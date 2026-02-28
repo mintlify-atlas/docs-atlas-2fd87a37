@@ -1,0 +1,162 @@
+---
+title: Basic operations
+description: Learn the fundamental operations in PVAC-HFHE including key generation, encryption, and decryption
+---
+
+This guide covers the essential operations you'll use in every PVAC-HFHE application. You'll learn how to set up the cryptographic system, encrypt data, and decrypt results.
+
+## Overview
+
+Every PVAC-HFHE workflow follows these steps:
+
+<Steps>
+  <Step title="Generate keys">
+    Create public and secret keys using the `keygen` function
+  </Step>
+  <Step title="Encrypt data">
+    Convert plaintext values to ciphertexts using `enc_value`
+  </Step>
+  <Step title="Perform operations">
+    Execute homomorphic operations on encrypted data
+  </Step>
+  <Step title="Decrypt results">
+    Recover plaintext values using `dec_value`
+  </Step>
+</Steps>
+
+## Setting up the cryptographic context
+
+Every PVAC-HFHE application starts by generating cryptographic keys:
+
+```cpp
+#include <pvac/pvac.hpp>
+using namespace pvac;
+
+int main() {
+    // Initialize parameters, public key, and secret key
+    Params prm;
+    PubKey pk;
+    SecKey sk;
+    
+    // Generate keys
+    keygen(prm, pk, sk);
+    
+    return 0;
+}
+```
+
+<Note>
+  The `keygen` function takes approximately 859ms according to benchmark data. This is a one-time operation per session.
+</Note>
+
+## Encrypting values
+
+Use `enc_value` to encrypt 64-bit unsigned integers:
+
+```cpp
+// Encrypt a single value
+uint64_t plaintext = 42;
+Cipher ciphertext = enc_value(pk, sk, plaintext);
+```
+
+### Example from source
+
+From `examples/basic_usage.cpp:59-63`:
+
+```cpp
+uint64_t a = 42, b = 17;
+Cipher ca = enc_value(pk, sk, a);
+Cipher cb = enc_value(pk, sk, b);
+CHECK(dec_value(pk, sk, ca).lo == a, "dec(42) = 42");
+CHECK(dec_value(pk, sk, cb).lo == b, "dec(17) = 17");
+```
+
+## Decrypting values
+
+The `dec_value` function returns a field element `Fp` with two components:
+
+```cpp
+Fp result = dec_value(pk, sk, ciphertext);
+uint64_t plaintext_value = result.lo;  // Lower 64 bits
+```
+
+<Warning>
+  Always use the `.lo` field of the returned `Fp` struct to extract the uint64 value. The `.hi` field contains upper bits of the 127-bit field element.
+</Warning>
+
+## Testing encryption correctness
+
+Verify your encryption pipeline with special values:
+
+```cpp
+// Test zero
+Cipher c0 = enc_value(pk, sk, 0);
+assert(dec_value(pk, sk, c0).lo == 0);
+
+// Test one
+Cipher c1 = enc_value(pk, sk, 1);
+assert(dec_value(pk, sk, c1).lo == 1);
+
+// Test large values
+uint64_t large = 123456789;
+Cipher c_large = enc_value(pk, sk, large);
+assert(dec_value(pk, sk, c_large).lo == large);
+```
+
+From `examples/basic_usage.cpp:66-70`:
+
+```cpp
+Cipher c0 = enc_value(pk, sk, 0);
+Cipher c1 = enc_value(pk, sk, 1);
+CHECK(dec_value(pk, sk, c0).lo == 0, "dec(0) = 0");
+CHECK(dec_value(pk, sk, c1).lo == 1, "dec(1) = 1");
+```
+
+## Performance characteristics
+
+Based on benchmark data:
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| `keygen` | 859ms | One-time setup |
+| `enc_value` | 84ms | Per encryption |
+| `dec_value` | 13ms | Per decryption |
+
+<Tip>
+  Fresh ciphertexts are only 42 KB in size, which is 6-85x smaller than comparable RLWE schemes like BFV and CKKS.
+</Tip>
+
+## Verifying randomness
+
+Encryptions of the same value produce different ciphertexts due to randomization:
+
+```cpp
+Cipher ca1 = enc_value(pk, sk, 100);
+Cipher ca2 = enc_value(pk, sk, 100);
+
+// Same plaintext
+assert(dec_value(pk, sk, ca1).lo == dec_value(pk, sk, ca2).lo);
+
+// Different ciphertext representation
+assert(ca1.E[0].w[0].lo != ca2.E[0].w[0].lo);
+```
+
+From `examples/basic_usage.cpp:216-221`:
+
+```cpp
+Cipher ca1 = enc_value(pk, sk, 100);
+Cipher ca2 = enc_value(pk, sk, 100);
+CHECK(dec_value(pk, sk, ca1).lo == dec_value(pk, sk, ca2).lo, "both = 100");
+CHECK(ca1.E[0].w[0].lo != ca2.E[0].w[0].lo, "diff rnd");
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Key generation" icon="key" href="/guides/key-generation">
+    Deep dive into parameters and key structures
+  </Card>
+  <Card title="Arithmetic operations" icon="calculator" href="/guides/arithmetic-operations">
+    Learn ct_add, ct_mul, and ct_sub
+  </Card>
+</CardGroup>

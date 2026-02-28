@@ -1,0 +1,281 @@
+---
+title: 'Text encoding'
+description: 'Text encryption and field element packing utilities'
+icon: 'text'
+---
+
+## Overview
+
+The text utilities provide functions for encrypting and decrypting strings using PVAC-HFHE. These functions handle the packing of byte data into field elements and manage variable-length message encoding.
+
+## Functions
+
+### enc_text
+
+Encrypts a string into a vector of ciphertexts, packing 15 bytes per ciphertext.
+
+```cpp
+std::vector<Cipher> enc_text(
+    const PubKey& pk,
+    const SecKey& sk,
+    const std::string& msg
+)
+```
+
+<ParamField path="pk" type="const PubKey &" required>
+  The public key for encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey &" required>
+  The secret key for encryption
+</ParamField>
+
+<ParamField path="msg" type="const std::string &" required>
+  The text message to encrypt
+</ParamField>
+
+<ResponseField name="return" type="std::vector<Cipher>">
+  A vector of ciphertexts where:
+  - `[0]` contains the encrypted message length
+  - `[1...]` contain the encrypted message data (15 bytes per ciphertext)
+</ResponseField>
+
+#### Encoding strategy
+
+1. **Length prefix**: The first ciphertext encodes `msg.size()` as a 64-bit value
+2. **Data packing**: Each subsequent ciphertext encodes up to 15 bytes using `pack_15_bytes_to_fp`
+3. **Depth hinting**: Each chunk uses increasing depth hints (starting at 2) to optimize noise management
+
+#### Example
+
+```cpp
+PubKey pk = /* ... */;
+SecKey sk = /* ... */;
+
+std::string message = "Hello, encrypted world!";
+std::vector<Cipher> encrypted = enc_text(pk, sk, message);
+
+// encrypted[0] = Enc(24)  // length
+// encrypted[1] = Enc("Hello, encrypte")  // first 15 bytes
+// encrypted[2] = Enc("d world!")  // remaining 8 bytes + padding
+```
+
+<Note>
+The depth hint increases with each chunk to manage noise accumulation. This makes later chunks slightly more expensive but maintains decryptability for long messages.
+</Note>
+
+---
+
+### dec_text
+
+Decrypts a vector of ciphertexts back into the original string.
+
+```cpp
+std::string dec_text(
+    const PubKey& pk,
+    const SecKey& sk,
+    const std::vector<Cipher>& cts
+)
+```
+
+<ParamField path="pk" type="const PubKey &" required>
+  The public key (used for decryption context)
+</ParamField>
+
+<ParamField path="sk" type="const SecKey &" required>
+  The secret key for decryption
+</ParamField>
+
+<ParamField path="cts" type="const std::vector<Cipher> &" required>
+  The encrypted text ciphertexts (must be in the format produced by `enc_text`)
+</ParamField>
+
+<ResponseField name="return" type="std::string">
+  The decrypted plaintext message. Returns an empty string if `cts` is empty.
+</ResponseField>
+
+#### Decoding process
+
+1. Decrypt the length from `cts[0]`
+2. Decrypt each chunk from `cts[1...]` using `unpack_fp_to_15_bytes`
+3. Concatenate all bytes and truncate to the original length
+
+#### Error handling
+
+- If `length.hi != 0`, a warning is printed to `stderr` and the value is clipped to 64 bits
+- If the buffer is shorter than the expected length, the result is truncated
+
+```cpp
+std::vector<Cipher> encrypted = enc_text(pk, sk, "Secret message");
+std::string recovered = dec_text(pk, sk, encrypted);
+
+assert(recovered == "Secret message");
+```
+
+<Note>
+The decrypted buffer always allocates `(length + 16)` bytes to handle potential rounding, but only returns the exact `length` bytes.
+</Note>
+
+---
+
+### pack_15_bytes_to_fp
+
+Packs up to 15 bytes into a single field element.
+
+```cpp
+Fp pack_15_bytes_to_fp(const uint8_t* p, size_t len)
+```
+
+<ParamField path="p" type="const uint8_t *" required>
+  Pointer to the byte array to pack
+</ParamField>
+
+<ParamField path="len" type="size_t" required>
+  Number of bytes to pack (clamped to maximum of 15)
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  A field element containing the packed bytes in little-endian order.
+</ResponseField>
+
+#### Packing layout
+
+Bytes are packed into the 120-bit field element (`Fp` = 2×64 bits, with 63 bits used in the high word):
+
+```
+Fp.lo  = bytes[0..7]   (little-endian)
+Fp.hi  = bytes[8..14]  (little-endian, max 7 bytes)
+```
+
+#### Capacity
+
+- Maximum: 15 bytes (120 bits)
+- Field size: 127 bits
+- Safety margin: 7 bits unused
+
+```cpp
+uint8_t data[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+Fp packed = pack_15_bytes_to_fp(data, 5);
+// packed.lo = 0x0504030201
+// packed.hi = 0x00
+```
+
+<Note>
+Only the first 15 bytes are packed. If `len > 15`, excess bytes are ignored. Bytes beyond `len` are treated as zero.
+</Note>
+
+---
+
+### unpack_fp_to_15_bytes
+
+Unpacks a field element into 15 bytes.
+
+```cpp
+void unpack_fp_to_15_bytes(const Fp& x, uint8_t* out)
+```
+
+<ParamField path="x" type="const Fp &" required>
+  The field element to unpack
+</ParamField>
+
+<ParamField path="out" type="uint8_t *" required>
+  Output buffer (must have space for at least 15 bytes)
+</ParamField>
+
+#### Unpacking layout
+
+The inverse of `pack_15_bytes_to_fp`:
+
+```
+out[0..7]  = Fp.lo  (little-endian)
+out[8..14] = Fp.hi  (little-endian)
+```
+
+#### Buffer requirements
+
+- Output buffer must be at least 15 bytes
+- No bounds checking is performed
+- Always writes exactly 15 bytes
+
+```cpp
+Fp packed = pack_15_bytes_to_fp((const uint8_t*)"Hello", 5);
+
+uint8_t buffer[15];
+unpack_fp_to_15_bytes(packed, buffer);
+// buffer[0..4] = "Hello"
+// buffer[5..14] = uninitialized/zero
+```
+
+<Note>
+This function always writes 15 bytes. If the original data was shorter, the extra bytes will contain the padding (zeros) from the packing operation.
+</Note>
+
+---
+
+## Usage patterns
+
+### Basic text encryption
+
+```cpp
+// Encrypt
+std::string plaintext = "Confidential data";
+std::vector<Cipher> encrypted = enc_text(pk, sk, plaintext);
+
+// Decrypt
+std::string recovered = dec_text(pk, sk, encrypted);
+assert(recovered == plaintext);
+```
+
+### Custom data encoding
+
+For non-text binary data, you can use the packing functions directly:
+
+```cpp
+// Encrypt binary data in chunks
+std::vector<uint8_t> data = /* ... */;
+std::vector<Cipher> chunks;
+
+for (size_t i = 0; i < data.size(); i += 15) {
+    size_t chunk_size = std::min((size_t)15, data.size() - i);
+    Fp packed = pack_15_bytes_to_fp(&data[i], chunk_size);
+    chunks.push_back(enc_fp(pk, sk, packed));
+}
+```
+
+### Length limits
+
+- Maximum message length: 2^64 - 1 bytes (practically unlimited)
+- Ciphertext expansion: `ceil(message_length / 15) + 1` ciphertexts
+- Each ciphertext adds ~150-300 KB depending on noise levels
+
+## Performance considerations
+
+### Ciphertext size
+
+For a message of length L:
+
+```
+Ciphertexts = 1 + ceil(L / 15)
+Total size ≈ (1 + ceil(L / 15)) × (edges × 150 bytes)
+```
+
+Example: A 150-byte message requires ~11 ciphertexts.
+
+### Depth management
+
+The increasing depth hint strategy means:
+- First chunks encrypt faster (depth 2)
+- Later chunks are slower but maintain correctness
+- For very long messages (>1 KB), consider batching or compression
+
+## Related functions
+
+- [`enc_value`](/api/ops/encrypt#enc_value) - Used internally for length encoding
+- [`enc_fp_depth`](/api/ops/encrypt#enc_fp_depth) - Used internally for chunk encryption
+- [`dec_value`](/api/ops/decrypt#dec_value) - Used internally for decryption
+
+## Source location
+
+```
+include/pvac/utils/text.hpp
+```

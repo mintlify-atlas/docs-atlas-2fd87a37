@@ -1,0 +1,279 @@
+---
+title: Random generation
+description: Cryptographically secure random number generation for PVAC-HFHE
+---
+
+## Overview
+
+This module provides cryptographically secure random number generation (CSPRNG) using platform-specific secure random sources. All randomness is suitable for cryptographic key generation and security-critical operations.
+
+## Core functions
+
+### csprng_bytes
+
+Generates cryptographically secure random bytes.
+
+```cpp
+void csprng_bytes(uint8_t* out, size_t n);
+```
+
+<ParamField path="out" type="uint8_t*">
+  Output buffer to fill with random bytes
+</ParamField>
+
+<ParamField path="n" type="size_t">
+  Number of random bytes to generate
+</ParamField>
+
+**Example:**
+```cpp
+uint8_t key[32];
+csprng_bytes(key, 32); // Generate 256-bit random key
+```
+
+<Warning>
+  This function calls `std::abort()` if the system random source fails. This is intentional to prevent insecure fallback behavior.
+</Warning>
+
+### csprng_u64
+
+Generates a cryptographically secure random 64-bit unsigned integer.
+
+```cpp
+uint64_t csprng_u64();
+```
+
+<ResponseField name="return" type="uint64_t">
+  Random 64-bit value
+</ResponseField>
+
+**Example:**
+```cpp
+uint64_t random_tag = csprng_u64();
+uint64_t random_seed = csprng_u64();
+```
+
+## Utility functions
+
+### load_le64
+
+Loads a 64-bit integer from a byte array in little-endian format.
+
+```cpp
+uint64_t load_le64(const uint8_t* p);
+```
+
+<ParamField path="p" type="const uint8_t*">
+  Pointer to 8 bytes
+</ParamField>
+
+<ResponseField name="return" type="uint64_t">
+  64-bit integer in host byte order
+</ResponseField>
+
+**Example:**
+```cpp
+uint8_t bytes[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+uint64_t value = load_le64(bytes);
+// value = 0x0807060504030201
+```
+
+### store_le64
+
+Stores a 64-bit integer into a byte array in little-endian format.
+
+```cpp
+void store_le64(uint8_t* p, uint64_t x);
+```
+
+<ParamField path="p" type="uint8_t*">
+  Output buffer (must have space for 8 bytes)
+</ParamField>
+
+<ParamField path="x" type="uint64_t">
+  Value to store
+</ParamField>
+
+**Example:**
+```cpp
+uint8_t bytes[8];
+store_le64(bytes, 0x0807060504030201ULL);
+// bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+```
+
+## Platform-specific implementations
+
+### macOS / BSD
+
+Uses `arc4random_buf()` for cryptographically secure random bytes.
+
+```cpp
+arc4random_buf(out, n);
+```
+
+<Note>
+  Available on macOS, FreeBSD, OpenBSD, and NetBSD.
+</Note>
+
+### Linux
+
+Uses the `getrandom()` system call with fallback to `/dev/urandom`.
+
+```cpp
+getrandom(out, n, 0);
+```
+
+<Note>
+  - Primary: `getrandom()` system call (Linux 3.17+)
+  - Fallback: Reads from `/dev/urandom` if `getrandom()` fails
+  - Handles interruptions (`EINTR`) automatically
+</Note>
+
+### Windows
+
+Uses `BCryptGenRandom()` with the system-preferred RNG.
+
+```cpp
+BCryptGenRandom(NULL, out, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+```
+
+<Note>
+  Requires `bcrypt.lib` (automatically linked via pragma).
+</Note>
+
+### Fallback (portable)
+
+Uses `std::random_device` for platforms without native secure random support.
+
+```cpp
+std::random_device rd;
+```
+
+<Warning>
+  The fallback implementation may not be cryptographically secure on all platforms. Prefer platforms with native secure random support for production use.
+</Warning>
+
+## Security properties
+
+### Cryptographic strength
+
+All platform-specific implementations provide:
+- **Unpredictability:** Output cannot be predicted from previous values
+- **Uniform distribution:** All bit patterns equally likely
+- **Sufficient entropy:** Backed by hardware or OS entropy sources
+- **Forward secrecy:** Compromise of current state doesn't reveal past outputs
+
+### Error handling
+
+<Warning>
+  If random generation fails, the library calls `std::abort()` rather than returning an error. This is a deliberate security decision:
+  - Prevents accidental use of non-random or predictable values
+  - Makes failures immediately visible during testing
+  - Avoids complex error propagation through cryptographic code
+</Warning>
+
+## Usage patterns
+
+### Key generation
+
+```cpp
+// Generate 256-bit PRF key
+std::array<uint64_t, 4> prf_key;
+for (int i = 0; i < 4; i++) {
+    prf_key[i] = csprng_u64();
+}
+```
+
+### Nonce generation
+
+```cpp
+Nonce128 generate_nonce() {
+    return Nonce128{
+        .lo = csprng_u64(),
+        .hi = csprng_u64()
+    };
+}
+```
+
+### Random seed buffer
+
+```cpp
+std::vector<uint64_t> generate_seed(size_t words) {
+    std::vector<uint64_t> seed(words);
+    csprng_bytes(reinterpret_cast<uint8_t*>(seed.data()),
+                 words * sizeof(uint64_t));
+    return seed;
+}
+```
+
+### Random field element
+
+```cpp
+Fp random_field_element() {
+    uint64_t lo = csprng_u64();
+    uint64_t hi = csprng_u64() & MASK63; // Top bit must be 0
+    return fp_from_words(lo, hi);
+}
+```
+
+## Testing considerations
+
+<Note>
+  **For deterministic testing:**
+  - The CSPRNG is not seedable by design (security requirement)
+  - For reproducible tests, use a separate PRNG (like SHAKE256)
+  - Never use test-only random sources in production code
+</Note>
+
+**Example deterministic testing pattern:**
+```cpp
+#ifdef TESTING
+  // Use deterministic PRNG for testing
+  std::mt19937_64 test_rng(fixed_seed);
+  return test_rng();
+#else
+  // Use secure random in production
+  return csprng_u64();
+#endif
+```
+
+## Relationship to other modules
+
+The random module is used by:
+
+- **Types** (`types.hpp`): `make_nonce128()`, `rand_fp_nonzero()`
+- **Hash** (`hash.hpp`): Seeding XOFs and PRNGs
+- **Key generation**: Generating secret keys and randomness
+- **Encryption**: Sampling error vectors and random masks
+
+## Performance characteristics
+
+<Note>
+  - `csprng_u64()`: ~10-50 CPU cycles on modern hardware
+  - `csprng_bytes()`: ~1-5 GB/s throughput for bulk generation
+  - Dominated by system call overhead for small requests
+  - Consider batching requests for small values
+</Note>
+
+**Batching example:**
+```cpp
+// Inefficient: many small calls
+for (int i = 0; i < 1000; i++) {
+    uint64_t x = csprng_u64();
+    process(x);
+}
+
+// Efficient: batch generation
+std::vector<uint64_t> randoms(1000);
+csprng_bytes(reinterpret_cast<uint8_t*>(randoms.data()),
+             1000 * sizeof(uint64_t));
+for (uint64_t x : randoms) {
+    process(x);
+}
+```
+
+## Related
+
+- [Types](/api/core/types) - Uses random generation for nonces and field elements
+- [Hash](/api/core/hash) - Deterministic randomness expansion via XOF
+- [Field operations](/api/core/field) - Random field element generation

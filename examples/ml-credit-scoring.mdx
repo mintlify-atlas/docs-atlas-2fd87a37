@@ -1,0 +1,519 @@
+---
+title: ML credit scoring
+description: Privacy-preserving machine learning with encrypted credit scoring
+---
+
+This example demonstrates a complete privacy-preserving machine learning workflow using PVAC-HFHE. A credit scoring neural network evaluates loan applications on encrypted data, ensuring both the model and applicant data remain private.
+
+## Overview
+
+The credit scoring system implements:
+
+- **8-input features**: Age, income, debt, savings, credit history, employment, defaults, and open accounts
+- **Hidden layer**: 4 neurons with cubic activation (x³)
+- **Output**: Single risk score (negative = low risk, positive = high risk)
+- **Fully homomorphic**: All computations on encrypted data
+
+<Note>
+This demonstrates PVAC-HFHE's capability to run real machine learning models on encrypted data with verifiable computation.
+</Note>
+
+## Architecture
+
+### Model structure
+
+```
+Input Layer (8 features)
+    ↓
+Hidden Layer (4 neurons, cubic activation)
+    ↓
+Output Layer (1 score)
+```
+
+### Features
+
+| Index | Feature | Unit | Description |
+|-------|---------|------|-------------|
+| 0 | age | years | Applicant's age |
+| 1 | income_k | thousands | Annual income |
+| 2 | debt_k | thousands | Outstanding debt |
+| 3 | savings_k | thousands | Total savings |
+| 4 | history_score | 0-100 | Credit history score |
+| 5 | employment_years | years | Years at current job |
+| 6 | defaults | count | Past payment defaults |
+| 7 | open_accounts | count | Active credit lines |
+
+### Decision logic
+
+```cpp
+if (score < 0) {
+    decision = "LOW_RISK";    // Approve loan
+} else {
+    decision = "HIGH_RISK";   // Deny or require review
+}
+```
+
+## Implementation
+
+<Steps>
+  <Step title="Define the model structure">
+    Create a simple MLP with 2-input hidden neurons:
+
+    ```cpp
+    struct Hidden2 {
+        uint8_t i0;      // First feature index
+        int64_t w0;      // First weight
+        uint8_t i1;      // Second feature index
+        int64_t w1;      // Second weight
+        int64_t b;       // Bias term
+    };
+
+    struct CreditMLP {
+        std::array<Hidden2, 4> hidden;  // 4 hidden neurons
+        std::array<int64_t, 4> out_w;   // Output weights
+        int64_t out_b;                  // Output bias
+    };
+    ```
+
+    The demo model:
+
+    ```cpp
+    CreditMLP model = {{
+        Hidden2{0, +1, 6, +12, -60},   // age + 12*defaults - 60
+        Hidden2{1, -1, 2, +2,  -30},   // -income + 2*debt - 30
+        Hidden2{3, -1, 5, -3,  +40},   // -savings - 3*employment + 40
+        Hidden2{4, -1, 7, +5,  -20}    // -history + 5*accounts - 20
+    }, {+1, +1, +1, +1}, 0};
+    ```
+  </Step>
+
+  <Step title="Key generation with custom parameters">
+    Use optimized parameters for ML workloads:
+
+    ```cpp
+    #include <pvac/pvac.hpp>
+    using namespace pvac;
+
+    Params prm;
+    prm.m_bits = 1024;         // Field size (use 8192 for production)
+    prm.lpn_n  = 1024;         // LPN parameter (use 4096 for production)
+    prm.edge_budget = 6000;    // Circuit size budget
+
+    PubKey pk;
+    SecKey sk;
+    keygen(prm, pk, sk);
+    ```
+
+    <Note>
+    These reduced parameters enable fast demos. For production, use default parameters from `Params` constructor (m_bits=8192, lpn_n=4096).
+    </Note>
+  </Step>
+
+  <Step title="Encrypt applicant features">
+    Convert applicant data to encrypted feature vector:
+
+    ```cpp
+    struct Applicant {
+        std::string name;
+        uint64_t age, income_k, debt_k, savings_k;
+        uint64_t history_score, employment_years, defaults, open_accounts;
+    };
+
+    std::array<Cipher, 8> encrypt_features(const PubKey& pk, const SecKey& sk,
+                                            const Applicant& a) {
+        return {
+            enc_value(pk, sk, a.age),
+            enc_value(pk, sk, a.income_k),
+            enc_value(pk, sk, a.debt_k),
+            enc_value(pk, sk, a.savings_k),
+            enc_value(pk, sk, a.history_score),
+            enc_value(pk, sk, a.employment_years),
+            enc_value(pk, sk, a.defaults),
+            enc_value(pk, sk, a.open_accounts)
+        };
+    }
+    ```
+  </Step>
+
+  <Step title="Implement homomorphic inference">
+    Evaluate the neural network on encrypted data:
+
+    ```cpp
+    // Linear combination: w0*x[i0] + w1*x[i1] + b
+    Cipher he_linear2(const PubKey& pk, const Cipher& x0, int64_t w0,
+                      const Cipher& x1, int64_t w1, int64_t b) {
+        Cipher result = ct_mul_const(pk, x0, w0);      // w0*x0
+        result = ct_add(pk, result,
+                       ct_mul_const(pk, x1, w1));      // + w1*x1
+        return ct_add_const(pk, result, b);            // + b
+    }
+
+    // Cubic activation: f(x) = x^3
+    Cipher he_cube(const PubKey& pk, const Cipher& x) {
+        Cipher x2 = ct_mul(pk, x, x);
+        return ct_mul(pk, x2, x);
+    }
+
+    // Full network inference
+    Cipher he_infer(const PubKey& pk, const CreditMLP& model,
+                    const std::array<Cipher, 8>& enc_x) {
+        // Hidden layer with cubic activation
+        auto hidden_ct = [&](const Hidden2& neuron) {
+            Cipher linear = he_linear2(pk,
+                enc_x[neuron.i0], neuron.w0,
+                enc_x[neuron.i1], neuron.w1,
+                neuron.b);
+            return he_cube(pk, linear);
+        };
+
+        // Output layer: weighted sum of hidden activations
+        Cipher out = ct_mul_const(pk, hidden_ct(model.hidden[0]), model.out_w[0]);
+        for (size_t j = 1; j < 4; ++j) {
+            out = ct_add(pk, out,
+                        ct_mul_const(pk, hidden_ct(model.hidden[j]), model.out_w[j]));
+        }
+        return ct_add_const(pk, out, model.out_b);
+    }
+    ```
+  </Step>
+
+  <Step title="Decrypt and interpret results">
+    Convert encrypted score to decision:
+
+    ```cpp
+    // Helper to convert field element to signed integer
+    int64_t fp_to_i64_small(const Fp& a) {
+        constexpr uint64_t NEG_BIT = 0x4000000000000000ULL;
+        if (a.hi & NEG_BIT) {
+            return -static_cast<int64_t>(fp_neg(a).lo);
+        }
+        return static_cast<int64_t>(a.lo);
+    }
+
+    // Decrypt score
+    Cipher enc_score = he_infer(pk, model, enc_features);
+    int64_t score = fp_to_i64_small(dec_value(pk, sk, enc_score));
+
+    // Make decision
+    std::string decision = (score < 0) ? "LOW_RISK" : "HIGH_RISK";
+    std::cout << "Score: " << score << std::endl;
+    std::cout << "Decision: " << decision << std::endl;
+    ```
+  </Step>
+</Steps>
+
+## Complete example
+
+```cpp
+#include <pvac/pvac.hpp>
+#include <iostream>
+#include <array>
+
+using namespace pvac;
+
+// Model and helper structures (from above)
+struct Hidden2 { uint8_t i0; int64_t w0; uint8_t i1; int64_t w1; int64_t b; };
+struct CreditMLP {
+    std::array<Hidden2, 4> hidden;
+    std::array<int64_t, 4> out_w;
+    int64_t out_b;
+};
+
+struct Applicant {
+    std::string name;
+    uint64_t age, income_k, debt_k, savings_k;
+    uint64_t history_score, employment_years, defaults, open_accounts;
+};
+
+// Helper functions (he_linear2, he_cube, etc. from above)
+
+int main() {
+    // Setup
+    Params prm;
+    prm.m_bits = 1024;
+    prm.lpn_n = 1024;
+    prm.edge_budget = 6000;
+    
+    PubKey pk;
+    SecKey sk;
+    keygen(prm, pk, sk);
+    
+    // Load model
+    CreditMLP model = {{
+        Hidden2{0, +1, 6, +12, -60},
+        Hidden2{1, -1, 2, +2,  -30},
+        Hidden2{3, -1, 5, -3,  +40},
+        Hidden2{4, -1, 7, +5,  -20}
+    }, {+1, +1, +1, +1}, 0};
+    
+    // Test applicant
+    Applicant alice = {"Alice", 29, 120, 20, 35, 78, 6, 0, 4};
+    
+    // Encrypt features
+    auto enc_features = encrypt_features(pk, sk, alice);
+    
+    // Homomorphic inference
+    Cipher enc_score = he_infer(pk, model, enc_features);
+    
+    // Decrypt and decide
+    int64_t score = fp_to_i64_small(dec_value(pk, sk, enc_score));
+    std::string decision = (score < 0) ? "LOW_RISK" : "HIGH_RISK";
+    
+    std::cout << "Applicant: " << alice.name << std::endl;
+    std::cout << "Score: " << score << std::endl;
+    std::cout << "Decision: " << decision << std::endl;
+    std::cout << "Circuit: " << enc_score.L.size() << " layers, "
+              << enc_score.E.size() << " edges" << std::endl;
+    
+    return 0;
+}
+```
+
+## Sample data
+
+The example includes a CSV dataset with test applicants:
+
+```csv
+name,age,income_k,debt_k,savings_k,history_score,employment_years,defaults,open_accounts
+shimon_gershenson,52,280,45,120,92,24,0,3
+rivka_avital,34,95,30,45,78,8,0,5
+moshe_goldfarb,45,180,85,60,65,18,1,7
+leah_bernstein,28,65,15,25,70,4,0,2
+david_rosenfeld,61,320,20,280,98,35,0,4
+sarah_katz,39,110,95,30,55,12,2,8
+```
+
+### Loading from CSV
+
+```cpp
+#include <fstream>
+#include <sstream>
+#include <vector>
+
+std::vector<Applicant> load_csv(const std::string& path) {
+    std::vector<Applicant> out;
+    std::ifstream in(path);
+    if (!in) return out;
+
+    std::string line;
+    std::getline(in, line);  // Skip header
+    
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string tok;
+        Applicant a;
+
+        std::getline(ss, a.name, ',');
+        
+        auto read = [&](uint64_t& v) {
+            std::getline(ss, tok, ',');
+            v = std::stoull(tok);
+        };
+        
+        read(a.age); read(a.income_k); read(a.debt_k); read(a.savings_k);
+        read(a.history_score); read(a.employment_years);
+        read(a.defaults); read(a.open_accounts);
+        out.push_back(a);
+    }
+    return out;
+}
+
+// Usage
+auto applicants = load_csv("examples/ml/credit_db.csv");
+```
+
+## Example output
+
+```
+[ml] keygen
+[ml] loaded = 10 rows
+
+-- shimon_gershenson --
+plain = -15072993
+he = -15072993
+match = OK
+decision = LOW_RISK
+ct = 496 layers, 4535 edges
+
+-- sarah_katz --
+plain = 64576
+he = 64576
+match = OK
+decision = HIGH_RISK
+ct = 496 layers, 4532 edges
+
+-- david_rosenfeld --
+plain = -24010368
+he = -24010368
+match = OK
+decision = LOW_RISK
+ct = 496 layers, 4535 edges
+
+[ml] done
+```
+
+## Privacy guarantees
+
+This implementation provides:
+
+1. **Client privacy**: Applicant features remain encrypted throughout evaluation
+2. **Model privacy**: Server can't determine exact model weights from operations
+3. **Verifiability**: All computations can be verified using PVAC commitments
+4. **No trusted party**: Neither client nor server can cheat undetected
+
+## Workflow summary
+
+<Steps>
+  <Step title="Client: Generate keys">
+    ```cpp
+    keygen(prm, pk, sk);
+    // Share pk with server, keep sk private
+    ```
+  </Step>
+
+  <Step title="Client: Encrypt features">
+    ```cpp
+    auto enc_features = encrypt_features(pk, sk, applicant);
+    // Send enc_features to server
+    ```
+  </Step>
+
+  <Step title="Server: Homomorphic inference">
+    ```cpp
+    Cipher enc_score = he_infer(pk, model, enc_features);
+    // Return enc_score to client
+    ```
+  </Step>
+
+  <Step title="Client: Decrypt and decide">
+    ```cpp
+    int64_t score = fp_to_i64_small(dec_value(pk, sk, enc_score));
+    std::string decision = (score < 0) ? "LOW_RISK" : "HIGH_RISK";
+    ```
+  </Step>
+</Steps>
+
+## Performance characteristics
+
+### Circuit complexity
+
+- **Depth**: 496 layers (cubic activation creates depth-3 operations per neuron)
+- **Size**: ~4,500 edges per inference
+- **Inference time**: Fast with demo parameters, production parameters provide stronger security
+
+### Scaling to production
+
+For production deployments:
+
+```cpp
+Params prm;  // Use defaults:
+// prm.m_bits = 8192
+// prm.lpn_n = 4096
+// prm.edge_budget = automatic
+```
+
+<Tip>
+For very fast production models, use the HFHE version over the OCTRA network for optimal performance.
+</Tip>
+
+## Extending the model
+
+### Adding more neurons
+
+```cpp
+// Expand to 8 hidden neurons
+struct CreditMLP {
+    std::array<Hidden2, 8> hidden;  // More neurons
+    std::array<int64_t, 8> out_w;
+    int64_t out_b;
+};
+```
+
+### Different activation functions
+
+```cpp
+// Quadratic activation: f(x) = x^2
+Cipher he_square(const PubKey& pk, const Cipher& x) {
+    return ct_mul(pk, x, x);
+}
+
+// Quintic activation: f(x) = x^5
+Cipher he_quintic(const PubKey& pk, const Cipher& x) {
+    Cipher x2 = ct_mul(pk, x, x);
+    Cipher x4 = ct_mul(pk, x2, x2);
+    return ct_mul(pk, x4, x);
+}
+```
+
+### Multi-class output
+
+```cpp
+// Return multiple scores for different risk categories
+std::array<Cipher, 3> he_multiclass_infer(
+    const PubKey& pk,
+    const MultiClassMLP& model,
+    const std::array<Cipher, 8>& enc_x) {
+    // Compute score for each class
+    return {
+        compute_class_score(pk, model.class0_weights, enc_x),
+        compute_class_score(pk, model.class1_weights, enc_x),
+        compute_class_score(pk, model.class2_weights, enc_x)
+    };
+}
+```
+
+## Building and running
+
+<Steps>
+  <Step title="Build the example">
+    ```bash
+    cd pvac-hfhe
+    make ml
+    ```
+  </Step>
+
+  <Step title="Run with sample data">
+    ```bash
+    ./build/examples/ml/credit_scoring
+    ```
+  </Step>
+
+  <Step title="Use custom data">
+    Create your own `credit_db.csv` with the same format and run again.
+  </Step>
+</Steps>
+
+## Source files
+
+Complete source code:
+- `examples/ml/credit_scoring.cpp` - Main inference code
+- `examples/ml/credit_db.csv` - Sample applicant data
+- `examples/ml/README.md` - Additional documentation
+
+## Applications
+
+This pattern extends to many privacy-preserving ML scenarios:
+
+- **Healthcare**: Diagnose patients without revealing medical records
+- **Finance**: Risk assessment with private financial data
+- **Hiring**: Candidate evaluation without bias or data exposure
+- **Insurance**: Premium calculation on encrypted claims history
+- **Fraud detection**: Pattern matching on encrypted transactions
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Basic usage" icon="play" href="/examples/basic-usage">
+    Learn PVAC-HFHE fundamentals
+  </Card>
+  <Card title="Polynomial evaluation" icon="function" href="/examples/polynomial-evaluation">
+    Understand activation functions
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Explore all available functions
+  </Card>
+  <Card title="Parameters" icon="sliders" href="/core-concepts/parameters">
+    Optimize for your use case
+  </Card>
+</CardGroup>

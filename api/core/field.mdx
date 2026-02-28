@@ -1,0 +1,395 @@
+---
+title: Field arithmetic
+description: Finite field operations for PVAC-HFHE
+---
+
+## Overview
+
+This module implements arithmetic operations in the finite field modulo the Mersenne prime p = 2^127 - 1. All operations are implemented using 128-bit arithmetic with two 64-bit words, where the high word uses only 63 bits.
+
+## Type definition
+
+### u128
+
+Unsigned 128-bit integer type.
+
+```cpp
+using u128 = unsigned __int128;
+```
+
+<Note>
+  Requires compiler support for 128-bit integers. Will fail to compile if not available.
+</Note>
+
+### MASK63
+
+Mask for the upper 63 bits.
+
+```cpp
+static constexpr uint64_t MASK63 = 0x7FFFFFFFFFFFFFFFULL;
+```
+
+## Construction
+
+### fp_from_u64
+
+Creates a field element from a 64-bit unsigned integer.
+
+```cpp
+Fp fp_from_u64(uint64_t x);
+```
+
+<ParamField path="x" type="uint64_t">
+  Input value (automatically reduced modulo p)
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Field element with value x mod p
+</ResponseField>
+
+**Example:**
+```cpp
+Fp zero = fp_from_u64(0);
+Fp one = fp_from_u64(1);
+Fp x = fp_from_u64(42);
+```
+
+### fp_from_words
+
+Creates a field element from two 64-bit words with automatic modular reduction.
+
+```cpp
+Fp fp_from_words(uint64_t lo, uint64_t hi);
+```
+
+<ParamField path="lo" type="uint64_t">
+  Low 64 bits
+</ParamField>
+
+<ParamField path="hi" type="uint64_t">
+  High 64 bits (will be reduced to 63 bits)
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Field element representing (hi * 2^64 + lo) mod p
+</ResponseField>
+
+**Example:**
+```cpp
+Fp x = fp_from_words(0xFFFFFFFFFFFFFFFFULL, 0x7FFFFFFFFFFFFFFFULL);
+```
+
+## Basic arithmetic
+
+### fp_add
+
+Addition in the field.
+
+```cpp
+Fp fp_add(const Fp& a, const Fp& b);
+```
+
+<ParamField path="a" type="const Fp&">
+  First operand
+</ParamField>
+
+<ParamField path="b" type="const Fp&">
+  Second operand
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Result of (a + b) mod p
+</ResponseField>
+
+**Example:**
+```cpp
+Fp a = fp_from_u64(10);
+Fp b = fp_from_u64(20);
+Fp sum = fp_add(a, b); // sum = 30
+```
+
+### fp_neg
+
+Negation in the field.
+
+```cpp
+Fp fp_neg(const Fp& a);
+```
+
+<ParamField path="a" type="const Fp&">
+  Input element
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Result of (-a) mod p = (p - a) mod p
+</ResponseField>
+
+**Example:**
+```cpp
+Fp a = fp_from_u64(5);
+Fp neg_a = fp_neg(a); // neg_a = p - 5
+```
+
+### fp_sub
+
+Subtraction in the field.
+
+```cpp
+Fp fp_sub(const Fp& a, const Fp& b);
+```
+
+<ParamField path="a" type="const Fp&">
+  Minuend
+</ParamField>
+
+<ParamField path="b" type="const Fp&">
+  Subtrahend
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Result of (a - b) mod p
+</ResponseField>
+
+**Example:**
+```cpp
+Fp a = fp_from_u64(30);
+Fp b = fp_from_u64(20);
+Fp diff = fp_sub(a, b); // diff = 10
+```
+
+### fp_mul
+
+Multiplication in the field.
+
+```cpp
+Fp fp_mul(const Fp& a, const Fp& b);
+```
+
+<ParamField path="a" type="const Fp&">
+  First factor
+</ParamField>
+
+<ParamField path="b" type="const Fp&">
+  Second factor
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Result of (a * b) mod p
+</ResponseField>
+
+**Example:**
+```cpp
+Fp a = fp_from_u64(6);
+Fp b = fp_from_u64(7);
+Fp product = fp_mul(a, b); // product = 42
+```
+
+<Note>
+  Multiplication uses optimized platform-specific implementations (MSVC intrinsics, GCC inline assembly, or portable 128-bit arithmetic).
+</Note>
+
+## Advanced operations
+
+### fp_inv
+
+Multiplicative inverse in the field.
+
+```cpp
+Fp fp_inv(const Fp& a);
+```
+
+<ParamField path="a" type="const Fp&">
+  Non-zero field element
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Result b such that (a * b) mod p = 1
+</ResponseField>
+
+**Example:**
+```cpp
+Fp a = fp_from_u64(5);
+Fp a_inv = fp_inv(a);
+Fp one = fp_mul(a, a_inv); // one = 1
+```
+
+<Warning>
+  Attempting to invert zero will produce incorrect results. The caller must ensure the input is non-zero.
+</Warning>
+
+### fp_inv_ct
+
+Constant-time multiplicative inverse using windowed exponentiation.
+
+```cpp
+Fp fp_inv_ct(const Fp& a);
+```
+
+<ParamField path="a" type="const Fp&">
+  Non-zero field element
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Multiplicative inverse of a
+</ResponseField>
+
+<Note>
+  This function computes a^(p-2) mod p using Fermat's little theorem. It uses windowed exponentiation with window size 5 for efficiency while maintaining constant-time operation.
+</Note>
+
+### fp_pow_u64
+
+Exponentiation with a 64-bit exponent.
+
+```cpp
+Fp fp_pow_u64(Fp a, uint64_t e);
+```
+
+<ParamField path="a" type="Fp">
+  Base element
+</ParamField>
+
+<ParamField path="e" type="uint64_t">
+  Exponent
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Result of a^e mod p
+</ResponseField>
+
+**Example:**
+```cpp
+Fp a = fp_from_u64(2);
+Fp result = fp_pow_u64(a, 10); // result = 2^10 = 1024
+```
+
+<Note>
+  Uses binary exponentiation (square-and-multiply) for efficiency.
+</Note>
+
+## Low-level operations
+
+### mul128x128
+
+Multiplies two 128-bit integers to produce a 256-bit result.
+
+```cpp
+void mul128x128(uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1,
+                uint64_t& z0, uint64_t& z1, uint64_t& z2, uint64_t& z3);
+```
+
+<ParamField path="a0" type="uint64_t">
+  Low word of first operand
+</ParamField>
+
+<ParamField path="a1" type="uint64_t">
+  High word of first operand
+</ParamField>
+
+<ParamField path="b0" type="uint64_t">
+  Low word of second operand
+</ParamField>
+
+<ParamField path="b1" type="uint64_t">
+  High word of second operand
+</ParamField>
+
+<ParamField path="z0" type="uint64_t&">
+  Output: bits [0:63] of result
+</ParamField>
+
+<ParamField path="z1" type="uint64_t&">
+  Output: bits [64:127] of result
+</ParamField>
+
+<ParamField path="z2" type="uint64_t&">
+  Output: bits [128:191] of result
+</ParamField>
+
+<ParamField path="z3" type="uint64_t&">
+  Output: bits [192:255] of result
+</ParamField>
+
+<Note>
+  This function has three implementations:
+  - MSVC: Uses `_umul128` intrinsic
+  - GCC on x86-64: Uses inline assembly with `mulq`
+  - Portable: Uses 128-bit integer arithmetic
+</Note>
+
+### fp_reduce256
+
+Reduces a 256-bit integer modulo p.
+
+```cpp
+Fp fp_reduce256(uint64_t z0, uint64_t z1, uint64_t z2, uint64_t z3);
+```
+
+<ParamField path="z0" type="uint64_t">
+  Bits [0:63]
+</ParamField>
+
+<ParamField path="z1" type="uint64_t">
+  Bits [64:127]
+</ParamField>
+
+<ParamField path="z2" type="uint64_t">
+  Bits [128:191]
+</ParamField>
+
+<ParamField path="z3" type="uint64_t">
+  Bits [192:255]
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  Result reduced modulo p = 2^127 - 1
+</ResponseField>
+
+<Note>
+  Uses the fact that 2^127 ≡ 1 (mod p) to perform efficient reduction via addition rather than division.
+</Note>
+
+## Implementation details
+
+### Field modulus
+
+The field modulus is the Mersenne prime:
+
+```
+p = 2^127 - 1 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+```
+
+This prime allows for efficient modular reduction using bitwise operations.
+
+### Representation
+
+Field elements are represented in the range [0, p) using two 64-bit words:
+- `lo`: bits [0:63]
+- `hi`: bits [64:126] (bit 127 is always 0)
+
+### Modular reduction
+
+Reduction modulo 2^127 - 1 is optimized using the identity:
+
+```
+x mod (2^127 - 1) = (x & (2^127 - 1)) + (x >> 127)
+```
+
+Multiple rounds may be needed to fully reduce the result.
+
+## Platform support
+
+<Warning>
+  This module requires 128-bit integer support (`unsigned __int128`). Compilation will fail on platforms without this feature.
+</Warning>
+
+Supported compilers:
+- GCC 4.6+
+- Clang 3.0+
+- MSVC with Clang frontend
+- ICC (Intel C++ Compiler)
+
+## Related
+
+- [Types](/api/core/types) - Fp type definition
+- [BitVec operations](/api/core/bitvec) - Binary vector operations

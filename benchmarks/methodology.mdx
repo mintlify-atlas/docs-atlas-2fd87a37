@@ -1,0 +1,260 @@
+---
+title: Testing methodology
+description: Hardware setup, measurement approach, and important caveats for PVAC-HFHE benchmarks
+---
+
+This page documents the methodology used to produce the benchmark results, including hardware configuration, measurement techniques, and important caveats to consider when interpreting the data.
+
+## Hardware setup
+
+All benchmarks were executed on a DigitalOcean droplet with the following specifications:
+
+- **CPU:** DigitalOcean Premium AMD 8-core @ 2.0 GHz
+- **RAM:** 32 GB
+- **OS:** Ubuntu 24.04 LTS
+- **Compiler:** g++ with `-O3 -march=native` optimization flags
+
+## Software versions
+
+| Component | Version/Type |
+|-----------|-------------|
+| PVAC-HFHE | Research PoC (unoptimized) |
+| OpenFHE | 1.2 (production optimized) |
+| BFV | OpenFHE 1.2 implementation |
+| BGV | OpenFHE 1.2 implementation |
+| CKKS | OpenFHE 1.2 implementation |
+| TFHE | OpenFHE 1.2 implementation |
+| FHEW | OpenFHE 1.2 implementation |
+
+<Note>
+PVAC-HFHE is compared as an early research proof of concept without production optimizations, while OpenFHE represents 10+ years of optimization work.
+</Note>
+
+## Security parameters
+
+All schemes are configured for **128-bit security level**:
+
+- **RLWE schemes (BFV, BGV, CKKS):** Standard RLWE 128-bit security
+- **Bit-level schemes (TFHE, FHEW):** 128-bit security
+- **PVAC-HFHE:** 128-bit security (estimated) based on LPN with n=4096
+
+<Warning>
+PVAC-HFHE security is based on the Learning Parity with Noise (LPN) problem, which is less studied than RLWE. While LPN has been analyzed extensively in cryptography, RLWE has received more attention in the FHE context. Security estimates should be considered preliminary.
+</Warning>
+
+## Timing methodology
+
+All timing measurements use the following approach:
+
+- **Clock:** C++ `std::chrono::steady_clock` for precise timing
+- **Statistics:** Mean of n runs (n varies by operation)
+- **Warmup:** Initial warmup runs performed before measurement
+- **Verification:** Correctness checked for all operations
+- **CKKS accuracy:** Error threshold < 0.01 for approximate operations
+
+### Sample sizes
+
+Different operations use different sample sizes based on execution time:
+
+- Fast operations (< 1ms): 50 runs
+- Medium operations (1-100ms): 10-50 runs  
+- Slow operations (> 100ms): 5-10 runs
+- Very slow operations (> 1s): 1 run
+
+## Verification approach
+
+All homomorphic operations are verified for correctness:
+
+```cpp
+// Example verification (from benchmark output)
+verify: 7*6 = 42, 7+6 = 13 (ok)
+```
+
+For CKKS approximate arithmetic:
+```cpp
+verify: 7*6 = 42.00 (err=0.00), 7+6 = 13.00 (err=0.00) (ok)
+```
+
+## Important caveats
+
+<Warning>
+Please carefully consider these caveats when interpreting benchmark results.
+</Warning>
+
+### 1. Implementation maturity gap
+
+**PVAC-HFHE** is an early proof of concept with:
+- No production optimizations
+- Limited SIMD instructions (only for matrix operations)
+- Cumbersome debugging systems affecting performance
+- Unoptimized initialization routines
+
+**OpenFHE** is a production library with:
+- 10+ years of optimization work
+- Extensive SIMD vectorization
+- Highly optimized number theoretic transforms
+- Hand-tuned assembly for critical paths
+
+<Info>
+The performance gap between PoC and production implementations is significant. Many of PVAC-HFHE's current limitations are expected to improve with optimization work.
+</Info>
+
+### 2. Bit-level FHE comparison
+
+The 64-bit multiplication comparison with TFHE/FHEW is a **derived estimate**, not a direct measurement:
+
+- Based on NAND gate latency × 24,576 gates (schoolbook multiplication)
+- No circuit optimizations applied
+- Does not account for potential parallelization
+
+<Warning>
+This comparison may not be fully indicative as bit-level FHE and scalar FHE solve fundamentally different problems. Bit-level schemes excel at arbitrary boolean circuits, while scalar schemes optimize integer arithmetic.
+</Warning>
+
+The comparison is included for academic interest and to demonstrate current performance characteristics, presented as honestly as possible.
+
+### 3. Security assumption differences
+
+**RLWE-based schemes** (BFV, BGV, CKKS):
+- Based on Ring Learning with Errors
+- Extensively studied in FHE context
+- Well-understood security reductions
+- Conservative parameter selection guidelines
+
+**PVAC-HFHE** (LPN-based):
+- Based on Learning Parity with Noise
+- Less studied in FHE context than RLWE
+- Active ongoing cryptanalysis
+- Security parameters under continuous evaluation
+
+<Note>
+While LPN is a well-established cryptographic assumption used in other contexts, its application to FHE is newer and requires ongoing security analysis.
+</Note>
+
+### 4. Plaintext modulus constraints
+
+**BFV/BGV requirements:**
+- Plaintext modulus must be NTT-friendly
+- p-1 must be divisible by 2×ring_dim
+- Limits choice of prime moduli
+
+**PVAC-HFHE:**
+- Works with arbitrary uint64 values
+- No NTT-friendly prime requirement
+- Full 64-bit integer range supported
+
+### 5. Depth performance characteristics
+
+The exponential degradation in PVAC-HFHE at deeper depths is a **proof of concept limitation**, not a fundamental property:
+
+- RLWE schemes use modulus switching to maintain constant depth performance
+- PVAC-HFHE PoC lacks equivalent optimizations
+- Ciphertext growth is similarly a PoC artifact
+
+### 6. SIMD vs parallelization
+
+The throughput comparison between RLWE SIMD and PVAC-HFHE parallelization involves different paradigms:
+
+- **RLWE SIMD:** Native slot-based parallelism
+- **PVAC-HFHE:** Thread-level parallelism
+
+These serve different use cases and have different trade-offs in terms of data layout and access patterns.
+
+## Reproducing the benchmarks
+
+### Prerequisites
+
+To run the benchmark suite yourself, you'll need:
+
+1. Full OpenFHE installation
+2. Build of Léo Ducas's FHEW library  
+3. PVAC-HFHE source code compiled
+4. C++ compiler with OpenMP support
+5. Several hours of compilation and execution time
+
+<Tip>
+If you love C++ and have a few hours available, running these benchmarks locally can provide valuable hands-on experience with different FHE schemes.
+</Tip>
+
+### Running the benchmarks
+
+From the `benchmarks/` directory:
+
+```bash
+make
+./bench -all
+cat results/all.csv
+```
+
+The benchmark suite will:
+1. Run all scheme comparisons
+2. Verify correctness of each operation
+3. Output timing statistics
+4. Generate CSV results in `results/all.csv`
+
+### Available benchmark targets
+
+```
+targets: bfv bgv binfhe ckks fhew pvac tfhe
+```
+
+You can run individual scheme benchmarks or use `-all` for complete comparison.
+
+## Output format
+
+Results are saved in CSV format with the following fields:
+
+```csv
+scheme,mode,op,mean,stddev,unit,n
+```
+
+- **scheme:** FHE scheme name (bfv, bgv, ckks, pvac, etc.)
+- **mode:** Operation mode (scalar, simd, bit, parallel)
+- **op:** Operation name (mul, add, keygen, encrypt, etc.)
+- **mean:** Mean execution time
+- **stddev:** Standard deviation
+- **unit:** Time unit (ms, us, ops_per_sec)
+- **n:** Number of samples
+
+## Benchmark suite completeness
+
+<Info>
+This is an open-source testbed used internally for full evaluation and comparison. Some tests may be incomplete as the suite continues to evolve.
+</Info>
+
+The benchmark suite covers:
+
+- ✓ Scalar operations (multiplication, addition)
+- ✓ Circuit depth evaluation  
+- ✓ Vector dot products
+- ✓ Polynomial evaluation
+- ✓ Ciphertext size measurements
+- ✓ Key generation and encryption
+- ✓ SIMD/parallel throughput
+- ✓ Bit-level FHE comparison
+- ✓ TFHE-rs GPU comparison (external data)
+
+## Result interpretation guidelines
+
+When interpreting these results:
+
+1. **Consider the implementation gap:** PVAC-HFHE is a PoC, OpenFHE is production-grade
+2. **Match schemes to workloads:** Different schemes excel at different tasks
+3. **Account for depth requirements:** Performance characteristics change with circuit depth
+4. **Consider total system cost:** Include key generation, encryption, and communication costs
+5. **Evaluate security assumptions:** Understand the cryptographic foundations of each scheme
+
+<Tip>
+These benchmarks are provided for hypothesis testing, bounty programs, and academic evaluation. For production deployment, conduct additional testing on your specific workload and hardware.
+</Tip>
+
+## Academic honesty
+
+We present these benchmarks as honestly as possible, including:
+
+- Unfavorable comparisons where PVAC-HFHE underperforms
+- Clear labeling of PoC limitations  
+- Acknowledgment of implementation maturity differences
+- Caveats on derived estimates and comparisons
+
+Our goal is to provide accurate performance data for informed evaluation and research, not to overstate capabilities.

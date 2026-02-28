@@ -1,0 +1,252 @@
+---
+title: Installation
+description: Get PVAC-HFHE set up in your C++17 project
+---
+
+## Prerequisites
+
+Before installing PVAC-HFHE, ensure your development environment meets these requirements:
+
+<Steps>
+  <Step title="C++17 compiler">
+    You need a compiler that supports C++17 or later:
+    
+    - **GCC**: Version 9 or higher
+    - **Clang**: Version 10 or higher
+    - **MSVC**: Visual Studio 2019 or higher
+    
+    <CodeGroup>
+    ```bash GCC
+    g++ --version
+    # Should show gcc version 9.0.0 or higher
+    ```
+    
+    ```bash Clang
+    clang++ --version
+    # Should show clang version 10.0.0 or higher
+    ```
+    
+    ```bash MSVC
+    cl
+    # Should show Microsoft C/C++ version 19.20 or higher
+    ```
+    </CodeGroup>
+  </Step>
+  
+  <Step title="x86-64 processor (recommended)">
+    For optimal performance, use a processor with PCLMUL support. Most modern Intel and AMD processors include this instruction set.
+    
+    Check PCLMUL support on Linux:
+    ```bash
+    grep -o 'pclmulqdq' /proc/cpuinfo | head -n 1
+    ```
+    
+    <Note>
+      PVAC-HFHE will work without PCLMUL, but cryptographic operations will be slower.
+    </Note>
+  </Step>
+</Steps>
+
+## Clone the repository
+
+PVAC-HFHE is a header-only library, so installation is straightforward:
+
+```bash
+git clone https://github.com/octra-labs/pvac_hfhe_cpp.git
+cd pvac_hfhe_cpp
+```
+
+## Project structure
+
+After cloning, your directory should look like this:
+
+```
+pvac_hfhe_cpp/
+├── include/
+│   └── pvac/
+│       ├── pvac.hpp          # Main header file
+│       ├── core/             # Core cryptographic primitives
+│       ├── crypto/           # Key generation and LPN
+│       ├── ops/              # Encryption/decryption operations
+│       └── utils/            # Utilities for text and metrics
+├── examples/                 # Example applications
+├── tests/                    # Test suite
+└── Makefile                  # Build configuration
+```
+
+## Include in your project
+
+PVAC-HFHE is header-only, so you just need to add the include path:
+
+<CodeGroup>
+```cpp Your code
+#include <pvac/pvac.hpp>
+
+using namespace pvac;
+
+int main() {
+    // Your PVAC-HFHE code here
+    return 0;
+}
+```
+
+```bash Compile
+g++ -std=c++17 -O2 -march=native -I./include your_program.cpp -o your_program
+```
+</CodeGroup>
+
+<Warning>
+  Always use `-march=native` flag to enable CPU-specific optimizations, including PCLMUL instructions if available.
+</Warning>
+
+## Compiler flags explained
+
+| Flag | Purpose |
+|------|--------|
+| `-std=c++17` | Enable C++17 standard support (required) |
+| `-O2` | Enable optimization level 2 for better performance |
+| `-march=native` | Use CPU-specific instructions (PCLMUL, AVX, etc.) |
+| `-I./include` | Add the include directory to the compiler search path |
+
+<Tip>
+  For production builds, consider using `-O3` for maximum optimization, though it may increase compilation time.
+</Tip>
+
+## Verify installation
+
+Test your installation by building and running the examples:
+
+<Steps>
+  <Step title="Build examples">
+    ```bash
+    make examples
+    ```
+    
+    This compiles all example programs in the `examples/` directory.
+  </Step>
+  
+  <Step title="Run basic usage example">
+    ```bash
+    ./build/examples/basic_usage
+    ```
+    
+    You should see output showing successful encryption, homomorphic operations, and decryption:
+    ```
+    pvac_hfhe 0.1.0
+
+     - 1. keygen - 
+       H = 0x...
+       m = 8192, n = 4096, B = 16
+    
+     - 2. enc / dec - 
+       ok: dec(42) = 42
+       ok: dec(17) = 17
+    ```
+  </Step>
+  
+  <Step title="Run test suite (optional)">
+    Verify everything works correctly by running the full test suite:
+    
+    ```bash
+    make test
+    ```
+    
+    This runs 42 comprehensive tests covering all library functionality.
+  </Step>
+</Steps>
+
+## Integration methods
+
+### Method 1: Direct include path
+
+Add the PVAC-HFHE include directory to your compiler flags:
+
+```bash
+g++ -std=c++17 -O2 -march=native -I/path/to/pvac_hfhe_cpp/include main.cpp -o app
+```
+
+### Method 2: Copy headers to system path
+
+Copy headers to your system include directory:
+
+```bash
+sudo cp -r include/pvac /usr/local/include/
+```
+
+Then compile without the `-I` flag:
+
+```bash
+g++ -std=c++17 -O2 -march=native main.cpp -o app
+```
+
+### Method 3: CMake integration
+
+For CMake projects, add the include directory:
+
+```cmake CMakeLists.txt
+cmake_minimum_required(VERSION 3.12)
+project(MyProject)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Add PVAC-HFHE include directory
+include_directories(/path/to/pvac_hfhe_cpp/include)
+
+# Enable optimizations
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -march=native")
+
+add_executable(my_app main.cpp)
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Compiler error: 'std::optional' not found">
+    This indicates your compiler doesn't fully support C++17. Update to:
+    - GCC 9 or higher
+    - Clang 10 or higher
+    - MSVC 2019 or higher
+  </Accordion>
+  
+  <Accordion title="Undefined reference errors during linking">
+    PVAC-HFHE is header-only and doesn't require linking. Ensure you're including `pvac/pvac.hpp` in your source files.
+  </Accordion>
+  
+  <Accordion title="Slow performance">
+    Ensure you're compiling with optimization flags:
+    - Add `-O2` or `-O3` for optimization
+    - Add `-march=native` to enable CPU-specific instructions
+    - Check that your CPU supports PCLMUL instructions
+  </Accordion>
+  
+  <Accordion title="Cannot find pvac/pvac.hpp">
+    Verify the include path is correct:
+    ```bash
+    # Check the include directory exists
+    ls /path/to/pvac_hfhe_cpp/include/pvac/pvac.hpp
+    
+    # Add -I flag pointing to the include directory
+    g++ -I/path/to/pvac_hfhe_cpp/include ...
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart guide"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Build your first homomorphic encryption application.
+  </Card>
+  <Card
+    title="Basic operations"
+    icon="calculator"
+    href="/guides/basic-operations"
+  >
+    Learn the fundamental operations for working with encrypted data.
+  </Card>
+</CardGroup>

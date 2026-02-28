@@ -1,0 +1,418 @@
+---
+title: Encryption scheme
+description: Understanding the hypergraph-based encryption in PVAC-HFHE
+---
+
+PVAC-HFHE uses a novel hypergraph-based encryption scheme secured by the Learning Parity with Noise (LPN) assumption.
+
+## High-level overview
+
+The encryption scheme consists of:
+
+1. **Syndrome graph construction**: Build a random k-uniform hypergraph
+2. **Noise generation**: Use PRF to generate structured noise from LPN
+3. **Layer-edge representation**: Express ciphertexts as computational graphs
+4. **Decryption via syndrome evaluation**: Recover plaintext by evaluating the hypergraph
+
+## Key parameters
+
+From `include/pvac/core/types.hpp:36-70`:
+
+```cpp
+struct Params {
+    int B = 337;              // Multiplicative group size
+    
+    int m_bits = 8192;        // Syndrome vector dimension
+    int n_bits = 16384;       // Hypergraph matrix columns
+    int h_col_wt = 192;       // H matrix column weight
+    int x_col_wt = 128;       // Noise vector sparsity
+    int err_wt = 128;         // Error weight
+    
+    double noise_entropy_bits = 120.0;  // Noise entropy budget
+    double tuple2_fraction = 0.55;      // 2-tuple vs 3-tuple ratio
+    double depth_slope_bits = 16.0;     // Noise growth per depth
+    size_t edge_budget = 1200000;       // Max edges before compaction
+    
+    // LPN parameters (τ = 1/8)
+    int lpn_n = 4096;         // LPN secret dimension
+    int lpn_t = 16384;        // LPN sample count
+    int lpn_tau_num = 1;      // Noise rate numerator
+    int lpn_tau_den = 8;      // Noise rate denominator (τ = 1/8)
+    
+    double recrypt_lo = 0.48; // Recryption threshold (lower)
+    double recrypt_hi = 0.52; // Recryption threshold (upper)
+    int recrypt_rounds = 8;   // Recryption rounds
+};
+```
+
+<Info>
+These parameters provide **128-bit security** based on LPN hardness with noise rate τ = 1/8.
+
+Security analysis:
+- Information-theoretic bound: 2226 bits
+- Classical security: 200+ bits
+- Quantum security: 100+ bits
+</Info>
+
+## Ciphertext structure
+
+A ciphertext is a computational graph with layers and hypergraph edges:
+
+```cpp
+struct Cipher {
+    std::vector<Layer> L;     // Computation layers
+    std::vector<Edge> E;      // Hypergraph edges
+    std::vector<Fp> c0;       // Plaintext constant
+    size_t slots = 1;         // Batching slots
+};
+```
+
+### Layers
+
+Layers represent computation nodes:
+
+```cpp
+enum class RRule : uint8_t {
+    BASE = 0,  // Fresh encryption
+    PROD = 1   // Multiplication result
+};
+
+struct Layer {
+    RRule rule;       // Layer type
+    RSeed seed;       // Randomness seed
+    uint32_t pa;      // Parent A (for PROD)
+    uint32_t pb;      // Parent B (for PROD)
+};
+```
+
+From `include/pvac/core/types.hpp:91-101`.
+
+- **BASE layers**: Created during fresh encryption
+- **PROD layers**: Created during homomorphic multiplication
+
+### Edges
+
+Edges encode the hypergraph structure:
+
+```cpp
+enum EdgeSign : uint8_t {
+    SGN_P = 0,  // Positive sign (+)
+    SGN_M = 1   // Negative sign (-)
+};
+
+struct Edge {
+    uint32_t layer_id;      // Which layer this edge belongs to
+    uint16_t idx;           // Index in [0, B-1]
+    uint8_t ch;             // Sign: SGN_P or SGN_M
+    std::vector<Fp> w;      // Weight vector (field elements)
+    BitVec s;               // Syndrome vector (m_bits)
+};
+```
+
+From `include/pvac/core/types.hpp:103-114`.
+
+<Note>
+Each edge contributes `sign * w[slot] * g^idx` to the encrypted value, where the syndrome `s` provides LPN-based security.
+</Note>
+
+## Encryption algorithm
+
+### Fresh encryption
+
+Encrypting a value `v` at depth `d`:
+
+```cpp
+Cipher enc_fp_depth(const PubKey& pk, const SecKey& sk, 
+                    const Fp& v, int d) {
+    return core::synth(pk, sk, {v}, d);
+}
+```
+
+The `synth` function from `include/pvac/ops/encrypt.hpp:559-602`:
+
+```cpp
+Cipher synth(const PubKey& pk, const SecKey& sk, 
+             const std::vector<Fp>& v, int depth) {
+    size_t S = v.size();  // Number of slots
+    
+    // 1. Create a BASE layer with random seed
+    Layer L{};
+    L.rule = RRule::BASE;
+    L.seed.nonce = make_nonce128();
+    L.seed.ztag = prg_layer_ztag(pk.canon_tag, L.seed.nonce);
+    
+    // 2. Compute noise entropy budget for this depth
+    entropy::Budget b = entropy::Budget::compute(pk.prm, depth);
+    
+    // 3. Generate noise deltas using PRF
+    delta::Gen dg{ pk, sk, L.seed };
+    delta::Set ds = delta::Set::make(dg, b, S);
+    
+    // 4. Generate random mask R using PRF
+    auto R = prf_R_slots(pk, sk, L.seed, S);
+    
+    // 5. Compute adjusted value: va = v - noise
+    auto va = field::Op::sub(v, ds.agg);
+    
+    // 6. Create hypergraph edges to encode va
+    idx::Selector sel(pk.prm.B);
+    graph::Emitter em{ pk, L.seed };
+    
+    // Build signature edge (8 edges to encode va)
+    graph::SigEdge sig(pk, sel);
+    alg::Carrier<graph::SigNode> sn = sig.build(va);
+    
+    alg::Carrier<Edge> se = sn.fmap([&](const graph::SigNode& n) {
+        return em(n.pos, n.pol, field::Op::mul(n.coef, R));
+    });
+    
+    // Add 2-tuple and 3-tuple noise edges
+    graph::N2Edge n2e(pk, sel);
+    for (int t = 0; t < b.n2; ++t) {
+        se += graph::realize(em, R, n2e.build(ds[t], S));
+    }
+    
+    graph::N3Edge n3e(pk, sel);
+    for (int t = 0; t < b.n3; ++t) {
+        se += graph::realize(em, R, 
+                           n3e.build(ds[b.n2 + t], S));
+    }
+    
+    // 7. Merge and permute edges
+    alg::Carrier<Edge> all = 
+        reduction::permute(reduction::merge(std::move(se), pk));
+    
+    // 8. Return ciphertext
+    Cipher C;
+    C.slots = S;
+    C.c0 = field::Op::zeros(S);
+    C.L.push_back(L);
+    C.E = std::move(all).unwrap();
+    return C;
+}
+```
+
+### Encryption steps
+
+#### 1. Noise budget computation
+
+```cpp
+struct Budget {
+    int n2;  // Number of 2-tuples
+    int n3;  // Number of 3-tuples
+    
+    static Budget compute(const Params& p, int d) {
+        double cap = p.noise_entropy_bits 
+                   + p.depth_slope_bits * std::max(0, d);
+        double c2 = 2.0 * std::log2((double)p.B);
+        double c3 = 3.0 * std::log2((double)p.B);
+        
+        int q2 = std::max(0, (int)std::floor(
+            cap * p.tuple2_fraction / std::max(1e-6, c2)));
+        int q3 = std::max(0, (int)std::floor(
+            cap * (1.0 - p.tuple2_fraction) / std::max(1e-6, c3)));
+        
+        return { q2, q3 };
+    }
+};
+```
+
+From `include/pvac/ops/encrypt.hpp:194-214`.
+
+<Tip>
+Noise budget grows linearly with depth: `budget(d) = 120 + 16*d` bits. This allows deeper circuits while maintaining security.
+</Tip>
+
+#### 2. PRF-based randomness
+
+The scheme uses pseudorandom functions based on LPN:
+
+```cpp
+Fp prf_R(const PubKey& pk, const SecKey& sk, const RSeed& seed) {
+    // Generate three independent LPN samples and multiply
+    Fp r1 = prf_R_core(pk, sk, seed, Dom::PRF_R1);
+    Fp r2 = prf_R_core(pk, sk, seed, Dom::PRF_R2);
+    Fp r3 = prf_R_core(pk, sk, seed, Dom::PRF_R3);
+    return fp_mul(fp_mul(r1, r2), r3);
+}
+```
+
+From `include/pvac/crypto/lpn.hpp:263-268`.
+
+Each `prf_R_core` call:
+1. Generates LPN matrix rows using AES-CTR
+2. Computes dot product with secret key
+3. Adds noise with rate τ = 1/8
+4. Applies Toeplitz hash to extract 127 bits
+5. Maps to nonzero field element
+
+<Info>
+Using three independent samples (with domain separation) increases security margin.
+</Info>
+
+#### 3. Hypergraph edge construction
+
+Three types of edges encode the value:
+
+**Signature edges** (K=8 edges) encode the main value:
+
+```cpp
+alg::Carrier<SigNode> build(const std::vector<Fp>& target) const {
+    size_t S = target.size();
+    alg::Carrier<SigNode> nodes = alg::gen(K, [&](size_t) -> SigNode {
+        std::vector<Fp> c(S);
+        for (auto& x : c) x = field::Op::rnd();
+        return { sel_.fresh(), idx::Selector::bit(), std::move(c) };
+    });
+    
+    // First K-1 edges: random
+    auto acc = field::Op::zeros(S);
+    for (size_t i = 0; i + 1 < nodes.len(); ++i) {
+        const SigNode& n = nodes[i];
+        acc = field::Op::add(acc, 
+            field::Op::sgn(field::Op::mul(n.coef, pk_.powg_B[n.pos]), 
+                          n.pol));
+    }
+    
+    // Last edge: chosen to match target
+    SigNode& last = nodes.back();
+    auto rem = field::Op::sub(target, acc);
+    auto q = field::Op::mul(rem, field::Op::inv(pk_.powg_B[last.pos]));
+    last.coef = sgn_val(last.pol) < 0 ? field::Op::neg(q) : q;
+    
+    return nodes;
+}
+```
+
+From `include/pvac/ops/encrypt.hpp:352-372`.
+
+**2-tuple edges** add structured noise:
+
+```cpp
+N2 build(const std::vector<Fp>& dt, size_t slots) const {
+    int a = (int)(csprng_u64() % (uint64_t)pk_.prm.B);
+    int b = sel_.avoid(a);  // b ≠ a
+    uint8_t sa = idx::Selector::bit();
+    uint8_t sb = sa ^ 1;    // Opposite signs
+    
+    Fp gb_inv = field::Op::inv(pk_.powg_B[b]);
+    std::vector<Fp> ra(slots), rb(slots);
+    
+    for (size_t j = 0; j < slots; ++j) {
+        Fp d = sgn_val(sa) > 0 ? dt[j] : field::Op::neg(dt[j]);
+        ra[j] = field::Op::rnd();
+        // Choose rb so: sa*ra*g^a + sb*rb*g^b = d
+        rb[j] = field::Op::mul(
+            field::Op::sub(field::Op::mul(ra[j], pk_.powg_B[a]), d),
+            gb_inv);
+    }
+    return { a, b, sa, sb, std::move(ra), std::move(rb) };
+}
+```
+
+From `include/pvac/ops/encrypt.hpp:388-401`.
+
+**3-tuple edges** add even more noise:
+
+Similar construction with 3 edges that sum to the delta value.
+
+## Syndrome vectors
+
+Each edge has a syndrome vector `s` of length `m_bits = 8192`:
+
+```cpp
+BitVec sigma_from_H(const PubKey& pk, uint64_t ztag, 
+                    const Nonce128& nonce, uint16_t idx, 
+                    uint8_t ch, uint64_t salt);
+```
+
+The syndrome is computed as:
+
+```
+s = H * x
+```
+
+where:
+- `H` is a random `m_bits × n_bits` binary matrix (8192 × 16384)
+- `x` is a random sparse binary vector with weight `x_col_wt = 128`
+- `H` has column weight `h_col_wt = 192`
+
+<Note>
+The syndrome provides LPN-based security. Without the secret key, recovering the plaintext from syndromes is as hard as solving LPN.
+</Note>
+
+## Ciphertext size
+
+### Fresh ciphertext
+
+For a fresh encryption at depth 0:
+
+```
+size ≈ |L| * sizeof(Layer) + |E| * (sizeof(Edge) + m_bits/8 + slots*16)
+```
+
+Typically:
+- 1 layer: 40 bytes
+- ~200 edges: each ~250 bytes (1024-bit syndrome + weights)
+- **Total: ~42 KB**
+
+### Growth with depth
+
+| Depth | Time (ms) | Size | Growth |
+|-------|-----------|------|--------|
+| d=0 | - | 42 KB | 1.0× |
+| d=1 | 2.68 | 34 KB | 0.8× |
+| d=2 | 10.34 | 136 KB | 3.2× |
+| d=3 | 31.46 | 441 KB | 10.5× |
+| d=4 | 97.11 | 1359 KB | 32× |
+| d=5 | 285.83 | 4112 KB | 98× |
+
+From `benchmarks/README.md:88-97`.
+
+<Warning>
+Ciphertext size grows exponentially with multiplicative depth in this PoC. Production implementations would use recryption/bootstrapping.
+</Warning>
+
+## Code example
+
+```cpp
+#include <pvac/pvac.hpp>
+
+using namespace pvac;
+
+int main() {
+    // 1. Generate keys
+    Params prm;  // Use default parameters
+    PubKey pk;
+    SecKey sk;
+    keygen(prm, pk, sk);
+    
+    // 2. Encrypt a value at depth 0
+    Cipher ct = enc_value(pk, sk, 42);
+    
+    std::cout << "Layers: " << ct.L.size() << "\n";
+    std::cout << "Edges: " << ct.E.size() << "\n";
+    std::cout << "Slots: " << ct.slots << "\n";
+    
+    // 3. Inspect first edge
+    const Edge& e = ct.E[0];
+    std::cout << "Edge 0:\n";
+    std::cout << "  layer_id: " << e.layer_id << "\n";
+    std::cout << "  idx: " << e.idx << "\n";
+    std::cout << "  sign: " << (e.ch == SGN_P ? "+" : "-") << "\n";
+    std::cout << "  syndrome_weight: " << e.s.popcnt() << "\n";
+    
+    return 0;
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Homomorphic operations" icon="function" href="/concepts/homomorphic-operations">
+    Learn how to compute on encrypted data
+  </Card>
+  <Card title="Security" icon="shield" href="/concepts/security">
+    Understand the LPN-based security
+  </Card>
+</CardGroup>

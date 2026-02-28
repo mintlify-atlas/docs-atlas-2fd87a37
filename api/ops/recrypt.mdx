@@ -1,0 +1,251 @@
+---
+title: Recryption operations
+description: Bootstrapping and noise refreshing functions for deep circuits
+---
+
+## Overview
+
+Recryption (bootstrapping) allows refreshing the noise in a ciphertext without changing its encrypted value. This enables computation of arbitrary-depth circuits by periodically refreshing ciphertexts during evaluation.
+
+## Evaluation key
+
+### `make_evalkey`
+
+Creates an evaluation key for bootstrapping operations.
+
+```cpp
+EvalKey make_evalkey(const PubKey& pk, const SecKey& sk, size_t pool_size, int depth_hint)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key
+</ParamField>
+
+<ParamField path="pool_size" type="size_t" required>
+  Number of zero ciphertexts to pre-generate for the pool
+</ParamField>
+
+<ParamField path="depth_hint" type="int" required>
+  Expected circuit depth for noise budget planning
+</ParamField>
+
+<ResponseField name="return" type="EvalKey">
+  Evaluation key containing a pool of zero encryptions and an encryption of 1
+</ResponseField>
+
+#### Description
+
+Generates an evaluation key used for recryption operations. The evaluation key contains:
+
+- **zero_pool**: A vector of `pool_size` zero ciphertexts with noise budget for depth `depth_hint`
+- **enc_one**: An encryption of the value 1
+
+The zero pool provides fresh randomness for noise balancing during recryption.
+
+<Note>
+  Larger pool sizes provide more randomness options but increase key size. A pool size of 8-16 is typically sufficient.
+</Note>
+
+See: recrypt.hpp:12
+
+---
+
+## Recryption
+
+### `ct_recrypt`
+
+Refreshes a ciphertext by balancing its sigma vector density.
+
+```cpp
+Cipher ct_recrypt(const PubKey& pk, const EvalKey& ek, const Cipher& in)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="ek" type="const EvalKey&" required>
+  Evaluation key containing zero pool
+</ParamField>
+
+<ParamField path="in" type="const Cipher&" required>
+  Ciphertext to refresh
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Refreshed ciphertext with balanced noise
+</ResponseField>
+
+#### Description
+
+Refreshes the ciphertext's noise without changing the encrypted value by:
+
+1. Checking if sigma density is unbalanced (outside [0.495, 0.505])
+2. If unbalanced, adding a random zero ciphertext from the pool
+3. Applying UBK (universal balancing key) operations
+4. Repeating up to 8 iterations or until balanced
+5. Compacting edges and layers
+
+The operation preserves the encrypted value while rebalancing the noise distribution.
+
+<Warning>
+  If the zero pool is empty or the ciphertext has no edges, the function returns the input unchanged.
+</Warning>
+
+See: recrypt.hpp:26
+
+---
+
+## Sigma density checking
+
+### `sigma_needs_balance`
+
+Checks if a ciphertext's sigma density requires rebalancing.
+
+```cpp
+bool sigma_needs_balance(const PubKey& pk, const Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="C" type="const Cipher&" required>
+  Ciphertext to check
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  `true` if sigma density is outside the balanced range [0.495, 0.505]
+</ResponseField>
+
+#### Description
+
+Computes the sigma vector density using `sigma_density(pk, C)` and returns `true` if the density is less than 0.495 or greater than 0.505.
+
+A balanced sigma density (near 0.5) indicates well-distributed noise, which is important for security and correctness.
+
+See: recrypt.hpp:21
+
+---
+
+## Implementation details
+
+### Noise balancing algorithm
+
+The recryption algorithm uses an iterative approach:
+
+```cpp
+for (int it = 0; it < 8 && sigma_needs_balance(pk, result); ++it) {
+    size_t idx = csprng_u64() % ek.zero_pool.size();
+    result = ct_add(pk, result, ek.zero_pool[idx]);
+    ubk_apply(pk, result);
+    guard_budget(pk, result, "recrypt");
+}
+```
+
+Each iteration:
+1. Selects a random zero ciphertext from the pool
+2. Adds it to the current result (adding zero doesn't change the value)
+3. Applies UBK transformations
+4. Checks and enforces edge budget
+
+The loop terminates when either:
+- Sigma density is balanced (in [0.495, 0.505]), or
+- 8 iterations have been performed
+
+### UBK operations
+
+The `ubk_apply` function (defined elsewhere) performs transformations on the ciphertext that help balance the sigma vectors while preserving the encrypted value.
+
+---
+
+## Example usage
+
+```cpp
+// Generate keys
+Params params = default_params();
+PubKey pk;
+SecKey sk;
+keygen(params, pk, sk);
+
+// Create evaluation key with pool of 12 zero ciphertexts
+EvalKey ek = make_evalkey(pk, sk, 12, 10);
+
+// Perform deep computation
+Cipher a = enc_value(pk, sk, 5);
+Cipher b = enc_value(pk, sk, 3);
+
+// Deep multiplication circuit
+Cipher result = a;
+for (int i = 0; i < 10; ++i) {
+    result = ct_mul(pk, result, b);
+    
+    // Refresh every few multiplications
+    if (i % 3 == 2) {
+        result = ct_recrypt(pk, ek, result);
+    }
+}
+
+// Decrypt final result
+Fp value = dec_value(pk, sk, result);
+```
+
+---
+
+## When to use recryption
+
+Recryption should be used when:
+
+1. **Deep circuits**: After multiple multiplications, ciphertexts grow large
+2. **Unbalanced noise**: When `sigma_needs_balance` returns true
+3. **Performance**: Large ciphertexts slow down operations
+4. **Memory**: Edge count approaches `pk.prm.edge_budget`
+
+<Note>
+  Recryption is relatively expensive compared to basic operations. Use it strategically rather than after every operation.
+</Note>
+
+---
+
+## Performance considerations
+
+<Note>
+  **Cost factors:**
+  - Recryption cost: O(edges * iterations)
+  - Typical iterations: 2-4 for moderately unbalanced ciphertexts
+  - Zero pool generation: One-time cost at key generation
+  - Pool size: Minimal impact on recryption speed
+</Note>
+
+<Warning>
+  Recryption adds fresh noise. While this refreshes the ciphertext, it doesn't reduce the accumulated noise from computation. The noise budget is determined by the parameter set and depth hint.
+</Warning>
+
+---
+
+## Advanced topics
+
+### Choosing pool size
+
+The zero pool size affects:
+- **Randomness**: Larger pools provide more diverse zero ciphertexts
+- **Key size**: Each zero ciphertext adds to the evaluation key size
+- **Security**: More randomness can improve noise distribution
+
+Recommended pool sizes:
+- **Small circuits** (depth ≤ 5): pool_size = 4-8
+- **Medium circuits** (depth ≤ 15): pool_size = 8-16  
+- **Large circuits** (depth > 15): pool_size = 16-32
+
+### Depth hint selection
+
+The depth hint determines the noise budget for zero ciphertexts:
+- Set it to the expected maximum depth of your circuit
+- Too low: Zero ciphertexts may not provide enough noise refresh
+- Too high: Wastes noise budget, larger ciphertexts
+
+For circuits with variable depth, use the worst-case expected depth.

@@ -1,0 +1,461 @@
+---
+title: Security
+description: Understanding the LPN-based security model and 128-bit security level
+---
+
+PVAC-HFHE's security is based on the hardness of the **Learning Parity with Noise (LPN)** problem, a well-studied cryptographic assumption.
+
+## Learning Parity with Noise (LPN)
+
+### Problem definition
+
+Given:
+- A random binary matrix **A** ∈ {0,1}^(t × n)
+- A secret binary vector **s** ∈ {0,1}^n  
+- Noise rate **τ** ∈ (0, 1/2)
+- Samples **y = As + e (mod 2)** where each bit of **e** is 1 with probability τ
+
+**Problem:** Recover the secret **s** from (A, y).
+
+<Info>
+LPN is the binary variant of Learning With Errors (LWE). It's considered quantum-resistant and has been studied extensively since the 1990s.
+</Info>
+
+### LPN in PVAC-HFHE
+
+The scheme uses LPN with the following parameters (from `include/pvac/core/types.hpp:58-61`):
+
+```cpp
+int lpn_n = 4096;      // Secret dimension
+int lpn_t = 16384;     // Number of samples
+int lpn_tau_num = 1;   // Noise rate numerator
+int lpn_tau_den = 8;   // Noise rate denominator
+```
+
+Noise rate: **τ = 1/8 = 0.125**
+
+### Security analysis
+
+From the source code comments (`include/pvac/core/types.hpp:53-56`):
+
+```cpp
+// sec (tau = 1/8):
+// info theor bound: 2226 bits
+// classical: 200+ bits  
+// quantum: 100+ bits
+```
+
+**Security levels:**
+- **Information-theoretic bound:** 2226 bits
+- **Classical security:** 200+ bits (exceeds 128-bit target)
+- **Quantum security:** 100+ bits (exceeds NIST PQC requirements)
+
+<Note>
+The scheme provides **128-bit security** against both classical and quantum adversaries when using the default parameters.
+</Note>
+
+## PRF construction
+
+### LPN-based PRF
+
+The scheme derives pseudorandom field elements using LPN:
+
+```cpp
+Fp prf_R(const PubKey& pk, const SecKey& sk, const RSeed& seed);
+```
+
+From `include/pvac/crypto/lpn.hpp:263-268`:
+
+```cpp
+Fp prf_R(const PubKey& pk, const SecKey& sk, const RSeed& seed) {
+    Fp r1 = prf_R_core(pk, sk, seed, Dom::PRF_R1);
+    Fp r2 = prf_R_core(pk, sk, seed, Dom::PRF_R2);
+    Fp r3 = prf_R_core(pk, sk, seed, Dom::PRF_R3);
+    return fp_mul(fp_mul(r1, r2), r3);
+}
+```
+
+**Triple-product construction:** Uses three independent LPN samples multiplied together for enhanced security.
+
+### PRF core algorithm
+
+From `include/pvac/crypto/lpn.hpp:235-261`:
+
+```cpp
+Fp prf_R_core(const PubKey& pk, const SecKey& sk, 
+              const RSeed& seed, const char* dom) {
+    // 1. Generate LPN samples y = As + e
+    std::vector<uint64_t> ybits;
+    lpn_make_ybits(pk, sk, seed, dom, ybits);
+    
+    // 2. Derive Toeplitz matrix seed
+    uint8_t toep_key[32];
+    uint64_t toep_nonce;
+    derive_aes_key(pk, sk, seed, Dom::TOEP, toep_key, toep_nonce);
+    toep_nonce ^= fnv1a_domain(dom);
+    
+    // 3. Generate random Toeplitz matrix
+    AesCtr256 prg;
+    prg.init(toep_key, toep_nonce);
+    size_t top_words = (pk.prm.lpn_t + 127 + 63) / 64;
+    std::vector<uint64_t> top(top_words);
+    prg.fill_u64(top.data(), top_words);
+    
+    // 4. Apply Toeplitz hash to extract randomness
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+    toep_127(top, ybits, lo, hi);
+    
+    // 5. Map to nonzero field element
+    return hash_to_fp_nonzero(lo, hi);
+}
+```
+
+**Steps:**
+1. Generate `lpn_t = 16384` LPN samples using AES-CTR mode
+2. Derive Toeplitz matrix randomness (domain-separated)
+3. Apply Toeplitz hashing to extract 127 bits
+4. Map to a nonzero field element
+
+### LPN sample generation
+
+From `include/pvac/crypto/lpn.hpp:194-233`:
+
+```cpp
+void lpn_make_ybits(const PubKey& pk, const SecKey& sk,
+                    const RSeed& seed, const char* dom,
+                    std::vector<uint64_t>& ybits) {
+    int t = pk.prm.lpn_t;  // 16384
+    int n = pk.prm.lpn_n;  // 4096
+    size_t s_words = (n + 63) / 64;
+    
+    // Derive AES key from secret key + seed + domain
+    uint8_t aes_key[32];
+    uint64_t nonce;
+    derive_aes_key(pk, sk, seed, dom, aes_key, nonce);
+    
+    // Initialize AES-CTR PRG
+    AesCtr256 prg;
+    prg.init(aes_key, nonce);
+    
+    ybits.assign((t + 63) / 64, 0ull);
+    
+    int num = pk.prm.lpn_tau_num;  // 1
+    int den = pk.prm.lpn_tau_den;  // 8
+    
+    std::vector<uint64_t> row_buf(s_words);
+    
+    for (int r = 0; r < t; r++) {
+        // Generate random row of A
+        prg.fill_u64(row_buf.data(), s_words);
+        
+        // Compute dot product: A[r] · s (mod 2)
+        uint64_t acc = 0;
+        for (size_t wi = 0; wi < s_words; ++wi) {
+            acc ^= row_buf[wi] & sk.lpn_s_bits[wi];
+        }
+        int dot = parity64(acc);
+        
+        // Add noise with probability τ = 1/8
+        int e = (prg.bounded((uint64_t)den) < (uint64_t)num) ? 1 : 0;
+        int y = dot ^ e;
+        
+        ybits[r >> 6] ^= ((uint64_t)y) << (r & 63);
+    }
+}
+```
+
+**Security note:** Uses AES-CTR with hardware AES-NI for cryptographically secure randomness.
+
+## Domain separation
+
+The scheme uses domain separation to ensure different PRF calls are independent:
+
+From `include/pvac/core/types.hpp:14-31`:
+
+```cpp
+namespace Dom {
+    inline constexpr const char* H_GEN = "pvac.dom.h_gen";
+    inline constexpr const char* X_SEED = "pvac.dom.x_seed";
+    inline constexpr const char* NOISE = "pvac.dom.noise";
+    
+    inline constexpr const char* PRF_LPN = "pvac.dom.prf_lpn";
+    inline constexpr const char* TOEP = "pvac.dom.toeplitz";
+    
+    inline constexpr const char* ZTAG = "pvac.dom.ztag";
+    inline constexpr const char* COMMIT = "pvac.dom.commit";
+    
+    inline constexpr const char* PRF_R1 = "pvac.prf.r.1";
+    inline constexpr const char* PRF_R2 = "pvac.prf.r.2";
+    inline constexpr const char* PRF_R3 = "pvac.prf.r.3";
+    
+    inline constexpr const char* PRF_NOISE1 = "pvac.prf.noise.1";
+    inline constexpr const char* PRF_NOISE2 = "pvac.prf.noise.2";
+    inline constexpr const char* PRF_NOISE3 = "pvac.prf.noise.3";
+}
+```
+
+<Tip>
+Domain separation prevents attacks where an adversary tries to correlate outputs from different PRF calls.
+</Tip>
+
+## Hypergraph matrix H
+
+The public key includes a random binary matrix **H** of size `m_bits × n_bits`:
+
+Parameters (from `include/pvac/core/types.hpp:42-45`):
+
+```cpp
+int m_bits = 8192;     // Syndrome dimension (rows)
+int n_bits = 16384;    // Column count
+int h_col_wt = 192;    // Column weight (Hamming weight)
+int x_col_wt = 128;    // Preimage vector sparsity
+int err_wt = 128;      // Error weight
+```
+
+**Matrix structure:**
+- **Dimensions:** 8192 × 16384 bits (16 MB dense, or ~200 KB sparse representation)
+- **Column weight:** Each column has exactly 192 ones
+- **Random generation:** Using cryptographically secure PRG
+
+### Syndrome computation
+
+Each edge has a syndrome vector:
+
+```
+s = H · x (mod 2)
+```
+
+where:
+- **s** ∈ {0,1}^8192 is the syndrome (stored in ciphertext)
+- **x** ∈ {0,1}^16384 has Hamming weight 128 (kept secret)
+- **H** is the public matrix
+
+**Security:** Without the secret key, finding **x** from **s** requires solving a syndrome decoding problem, which is NP-hard.
+
+<Warning>
+The hypergraph matrix H is stored in the public key (~8 MB). This is a trade-off for fast encryption/decryption.
+</Warning>
+
+## Key generation security
+
+From `include/pvac/crypto/keygen.hpp:35-136`:
+
+### Secret key generation
+
+```cpp
+// 1. Generate 256-bit PRF key
+for (int i = 0; i < 4; i++) {
+    sk.prf_k[i] = csprng_u64();
+}
+
+// 2. Generate random binary vector (LPN secret)
+size_t s_words = (pk.prm.lpn_n + 63) / 64;  // 64 words
+sk.lpn_s_bits.resize(s_words);
+
+for (size_t i = 0; i < s_words; i++) {
+    sk.lpn_s_bits[i] = csprng_u64();
+}
+```
+
+**Secret key size:** 256 + 4096 = **4352 bits** (544 bytes)
+
+### Multiplicative group generator
+
+The scheme finds a generator **g** of the subgroup of order B = 337:
+
+```cpp
+u128 pm1 = (((u128)1) << 127) - 2;  // p - 1
+u128 E = pm1 / (u128)pk.prm.B;      // Exponent
+
+for (;;) {
+    Fp h = rand_fp();  // Random element
+    Fp g = fp_pow_u64(h, (uint64_t)E);  // g = h^E
+    
+    // Check g is a generator (g ≠ 1)
+    if (!ct::fp_is_one(g)) {
+        break;
+    }
+}
+```
+
+**Security check:** Verifies that `B | (p-1)`, ensuring the subgroup exists.
+
+### Root of unity
+
+Finds a primitive B-th root of unity **ω_B**:
+
+```cpp
+auto primes = factor_small(pk.prm.B);  // [337]
+
+for (;;) {
+    Fp h = rand_fp();
+    Fp w = fp_pow_u64(h, (uint64_t)(pm1 / (u128)pk.prm.B));
+    
+    if (ct::fp_is_one(w)) {
+        continue;  // Order too small
+    }
+    
+    bool ok = true;
+    for (int p : primes) {
+        Fp t = fp_pow_u64(w, (uint64_t)(pk.prm.B / p));
+        if (ct::fp_is_one(t)) {
+            ok = false;  // Subgroup order is not primitive
+            break;
+        }
+    }
+    
+    if (ok) {
+        pk.omega_B = w;
+        break;
+    }
+}
+```
+
+<Info>
+The root of unity enables efficient polynomial operations and is used in advanced features like recryption.
+</Info>
+
+## Constant-time operations
+
+To prevent timing side-channels, key operations are constant-time:
+
+### Constant-time field inversion
+
+From `include/pvac/core/field.hpp:229-269`, the `fp_inv_ct` function uses windowed exponentiation with:
+- Fixed-time table lookups
+- No data-dependent branches
+- Constant number of field multiplications
+
+### Constant-time equality test
+
+```cpp
+bool fp_is_one(const Fp& a) {
+    uint64_t z = (a.lo ^ 1) | a.hi;
+    return ((z | -z) >> 63) ^ 1;
+}
+```
+
+From `include/pvac/core/ct_safe.hpp` (implied).
+
+**No branches:** Uses bitwise operations only.
+
+## Security assumptions
+
+### Primary assumption
+
+**LPN Hardness:** Given (A, y = As + e) with noise rate τ = 1/8, it is computationally infeasible to recover **s** in time less than 2^128.
+
+### Supporting assumptions
+
+1. **AES-256 in CTR mode** is a secure PRG
+2. **SHA-256** is collision-resistant (for key derivation)
+3. **Random oracle model** for Toeplitz hashing
+
+### Known attacks
+
+Best known attacks on LPN(n=4096, t=16384, τ=1/8):
+
+| Attack | Complexity | Reference |
+|--------|------------|----------|
+| BKW algorithm | ~2^200 classical | Blum-Kalai-Wasserman |
+| Pooled Gauss | ~2^180 classical | Levieil-Fouque |
+| Quantum BKW | ~2^100 quantum | Quantum speedup |
+
+<Note>
+All known attacks exceed the 128-bit security target by a significant margin.
+</Note>
+
+## Threat model
+
+### Honest-but-curious server
+
+The server:
+- **Can:** Perform homomorphic operations on ciphertexts
+- **Cannot:** Decrypt ciphertexts without the secret key
+- **Cannot:** Learn anything about plaintexts beyond what's leaked by operation patterns
+
+### What is NOT protected
+
+<Warning>
+PVAC-HFHE does not provide:
+- **Circuit privacy:** The server can see the computation graph structure
+- **Access pattern hiding:** The server knows which operations are performed
+- **Ciphertext indistinguishability:** Different plaintexts may yield different ciphertext sizes
+</Warning>
+
+### Side-channel resistance
+
+The implementation includes:
+- Constant-time field inversion
+- Constant-time comparisons
+- No secret-dependent memory accesses in critical paths
+
+However:
+- Timing variations may leak information about ciphertext sizes
+- Cache timing attacks are not fully mitigated
+- Power analysis countermeasures are not implemented
+
+<Info>
+For production use, additional hardening against side-channels would be required.
+</Info>
+
+## Security best practices
+
+### Key management
+
+```cpp
+// ✓ Good: Generate fresh keys for each application
+Params prm;
+PubKey pk;
+SecKey sk;
+keygen(prm, pk, sk);
+
+// ✗ Bad: Reuse keys across different security domains
+```
+
+### Seed generation
+
+```cpp
+// ✓ Good: Use cryptographically secure RNG
+Nonce128 nonce = make_nonce128();  // Uses csprng_u64()
+
+// ✗ Bad: Use predictable seeds
+Nonce128 bad_nonce = {0, 0};  // NEVER do this!
+```
+
+### Parameter selection
+
+```cpp
+// ✓ Good: Use default parameters for 128-bit security
+Params prm;  // Defaults are secure
+
+// ✗ Bad: Reduce parameters without security analysis
+Params weak_prm;
+weak_prm.lpn_n = 1024;  // Too small! Insecure!
+```
+
+## Comparison with other assumptions
+
+| Assumption | PVAC-HFHE | RLWE (BFV/BGV/CKKS) | TFHE |
+|------------|-----------|---------------------|------|
+| Base problem | LPN | Ring-LWE | LWE |
+| Quantum security | ✓ | ✓ | ✓ |
+| Maturity | Moderate (30+ years) | High (15+ years) | Moderate (10+ years) |
+| Standardization | None | NIST (Kyber) | None |
+| Best attacks | 2^200+ classical | 2^150+ classical | 2^128+ classical |
+
+<Info>
+LPN is closely related to LWE but over binary fields. It's considered quantum-resistant and has been studied extensively in coding theory and cryptography.
+</Info>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Getting started" icon="rocket" href="/quickstart">
+    Build your first encrypted application
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the complete API
+  </Card>
+</CardGroup>

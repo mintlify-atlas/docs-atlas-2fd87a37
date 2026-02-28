@@ -1,0 +1,128 @@
+---
+title: Key generation
+description: Generate public and secret keys for PVAC-HFHE encryption
+---
+
+The key generation module provides functionality to create cryptographic key pairs for the PVAC-HFHE scheme.
+
+## Functions
+
+### keygen()
+
+Generates a public-secret key pair for PVAC-HFHE encryption.
+
+```cpp
+void keygen(const Params& prm, PubKey& pk, SecKey& sk)
+```
+
+<ParamField path="prm" type="const Params&">
+  System parameters defining security and performance characteristics
+</ParamField>
+
+<ParamField path="pk" type="PubKey&">
+  Output parameter for the generated public key
+</ParamField>
+
+<ParamField path="sk" type="SecKey&">
+  Output parameter for the generated secret key
+</ParamField>
+
+#### Key generation process
+
+The `keygen()` function performs the following steps:
+
+1. **Parameter validation** - Verifies that `B` divides `(p-1)` where `p = 2^127 - 1`
+2. **Canonical tag generation** - Creates a random `canon_tag` for public key identification
+3. **Parity check matrix** - Generates the sparse parity check matrix `H` using `gen_H()`
+4. **Permutation generation** - Creates the public permutation `ubk` from `canon_tag`
+5. **PRF key setup** - Generates 4 random 64-bit PRF keys for the secret key
+6. **Subgroup generator** - Finds a generator `g` of order `B` in the multiplicative group
+7. **Power table** - Precomputes `powg_B[i] = g^i` for `i = 0` to `B-1`
+8. **Primitive root** - Finds a primitive `B`-th root of unity `omega_B`
+9. **LPN secret** - Generates random secret bits `lpn_s_bits` of length `lpn_n`
+
+<Note>
+The function will abort if the parameter `B` does not divide `(p-1)`, ensuring the multiplicative group structure is valid.
+</Note>
+
+### factor_small()
+
+Factors a small integer into its prime divisors.
+
+```cpp
+std::vector<int> factor_small(int n)
+```
+
+<ParamField path="n" type="int">
+  The integer to factor
+</ParamField>
+
+<ResponseField name="return" type="std::vector<int>">
+  Vector of unique prime divisors of `n`
+</ResponseField>
+
+This helper function is used internally to verify that generated roots of unity have the correct order. It returns only unique prime factors (not their multiplicities).
+
+## Generated key structures
+
+### Public key (PubKey)
+
+The public key contains:
+- `prm` - Copy of system parameters
+- `canon_tag` - Random tag for key identification
+- `H` - Sparse parity check matrix (n × m)
+- `ubk` - Public permutation and its inverse
+- `H_digest` - SHA-256 digest of matrix H for verification
+- `omega_B` - Primitive B-th root of unity
+- `powg_B` - Precomputed powers of subgroup generator
+
+### Secret key (SecKey)
+
+The secret key contains:
+- `prf_k` - Array of 4 pseudorandom function keys (64-bit each)
+- `lpn_s_bits` - LPN secret bit vector of length `lpn_n`
+
+## Security considerations
+
+<Warning>
+Key generation uses cryptographically secure randomness via `csprng_u64()`. Ensure proper system entropy before calling `keygen()`.
+</Warning>
+
+The security of the scheme depends on:
+- **LPN hardness** - The Learning Parity with Noise problem with parameters `(lpn_n, lpn_t, tau)`
+- **Sparse code syndrome** - The difficulty of decoding the sparse parity check matrix `H`
+- **PRF security** - The pseudorandom properties of the key derivation functions
+
+## Example usage
+
+```cpp
+#include <pvac/crypto/keygen.hpp>
+#include <pvac/core/types.hpp>
+
+using namespace pvac;
+
+// Use default parameters
+Params params;
+PubKey pk;
+SecKey sk;
+
+// Generate key pair
+keygen(params, pk, sk);
+
+// Keys are now ready for encryption and decryption
+```
+
+## Performance notes
+
+Key generation involves:
+- Finding a subgroup generator (requires exponentiation in the finite field)
+- Finding a primitive root of unity (requires primality testing)
+- Generating the sparse matrix H (deterministic from `canon_tag`)
+- Generating random LPN secrets (fast)
+
+Typical key generation takes several milliseconds on modern hardware.
+
+## Related functions
+
+- [`gen_H()`](/api/crypto/matrix#gen_h) - Generates the parity check matrix
+- [`gen_ubk_public()`](/api/crypto/matrix#gen_ubk_public) - Creates the public permutation

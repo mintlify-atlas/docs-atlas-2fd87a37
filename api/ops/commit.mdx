@@ -1,0 +1,225 @@
+---
+title: Commitment operations
+description: Cryptographic commitment functions for ciphertext binding
+---
+
+## Overview
+
+The commitment module provides cryptographic commitment functions for binding to ciphertext values. Commitments allow proving that a ciphertext was generated before a certain point without revealing the encrypted value.
+
+## Core commitment function
+
+### `commit_ct`
+
+Generates a SHA-256 commitment hash of a ciphertext.
+
+```cpp
+std::array<uint8_t, 32> commit_ct(const PubKey& pk, const Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key associated with the ciphertext
+</ParamField>
+
+<ParamField path="C" type="const Cipher&" required>
+  Ciphertext to commit to
+</ParamField>
+
+<ResponseField name="return" type="std::array<uint8_t, 32>">
+  256-bit SHA-256 commitment digest
+</ResponseField>
+
+#### Description
+
+Computes a cryptographic commitment to a ciphertext by hashing all of its components using SHA-256:
+
+1. **Domain separator**: `Dom::COMMIT` string
+2. **Public key binding**: `pk.H_digest` (32 bytes) and `pk.canon_tag` (8 bytes)
+3. **Layer structure**: For each layer in `C.L`:
+   - Layer rule type (BASE or PROD)
+   - For BASE layers: seed tag, nonce (lo, hi)
+   - For PROD layers: parent layer indices (pa, pb)
+4. **Slot count**: `C.slots`
+5. **Constant term**: Each field element in `C.c0` (lo, hi words)
+6. **Edges**: For each edge in `C.E`:
+   - Layer ID, position index, charge/sign
+   - Weight vector `w` (all field elements)
+   - Sigma bitvector `s` (all bits)
+
+The hash is computed using the SHA-256 algorithm with all values serialized in little-endian byte order.
+
+<Note>
+  The commitment includes the full ciphertext structure, making it binding to both the encrypted value and the specific encryption instance.
+</Note>
+
+See: commit.hpp:12
+
+---
+
+## Commitment properties
+
+### Binding
+
+The commitment is **binding**: Given a commitment `h = commit_ct(pk, C)`, it is computationally infeasible to find a different ciphertext `C'` such that `commit_ct(pk, C') = h`.
+
+This is guaranteed by the collision resistance of SHA-256.
+
+### Hiding
+
+The commitment is **NOT hiding**: The commitment reveals structural information about the ciphertext (number of layers, edges, slots). However, it does not reveal the encrypted plaintext value.
+
+### Deterministic
+
+The commitment is **deterministic**: Committing to the same ciphertext with the same public key always produces the same hash.
+
+```cpp
+Cipher C = enc_value(pk, sk, 42);
+auto h1 = commit_ct(pk, C);
+auto h2 = commit_ct(pk, C);
+// h1 == h2 always true
+```
+
+---
+
+## Use cases
+
+### Timestamping
+
+Commit to a ciphertext and publish the commitment hash to prove the ciphertext existed at a certain time:
+
+```cpp
+// Alice encrypts a value
+Cipher ct = enc_value(pk, sk, secret_value);
+
+// Alice publishes the commitment
+auto commitment = commit_ct(pk, ct);
+publish_to_blockchain(commitment);
+
+// Later, Alice reveals the ciphertext
+// Others can verify: commit_ct(pk, ct) == published_commitment
+```
+
+### Verifiable encryption
+
+Prove that an encrypted value was produced without modifying it later:
+
+```cpp
+// Encrypt and commit
+Cipher ct = enc_value(pk, sk, bid_amount);
+auto commitment = commit_ct(pk, ct);
+submit_sealed_bid(commitment);
+
+// Reveal phase
+reveal_bid(ct);
+// Verifier checks: commit_ct(pk, ct) == commitment
+```
+
+### Ciphertext integrity
+
+Detect if a ciphertext has been modified:
+
+```cpp
+Cipher ct = enc_value(pk, sk, 100);
+auto h_original = commit_ct(pk, ct);
+
+// ... ct transmitted or stored ...
+
+// Verify integrity
+auto h_received = commit_ct(pk, ct);
+if (h_original != h_received) {
+    // Ciphertext was modified!
+}
+```
+
+---
+
+## Implementation details
+
+### Domain separation
+
+The commitment uses the domain separator `Dom::COMMIT` to prevent hash collision attacks across different protocol contexts. This ensures commitments cannot be confused with other hash-based operations.
+
+### Field element encoding
+
+Field elements (`Fp`) are encoded as two 64-bit words:
+- `lo`: Lower 64 bits
+- `hi`: Upper 63 bits (with `MASK63` applied)
+
+Each word is serialized in little-endian byte order (8 bytes each).
+
+### Bitvector encoding
+
+Sigma bitvectors (`BitVec`) are encoded byte-by-byte:
+1. Compute byte count: `bytes = (s.nbits + 7) / 8`
+2. Encode full 8-byte words from `s.w[]` in little-endian
+3. Encode remaining bytes if `bytes % 8 != 0`
+
+---
+
+## Example usage
+
+```cpp
+// Basic commitment
+Cipher ct = enc_value(pk, sk, 42);
+auto commitment = commit_ct(pk, ct);
+
+// Print as hex
+for (uint8_t byte : commitment) {
+    printf("%02x", byte);
+}
+printf("\n");
+
+// Store commitment for later verification
+std::array<uint8_t, 32> stored_commitment = commitment;
+
+// Verify later
+if (commit_ct(pk, ct) == stored_commitment) {
+    std::cout << "Ciphertext verified!\n";
+}
+```
+
+---
+
+## Security considerations
+
+<Warning>
+  **Not hiding**: The commitment reveals ciphertext structure (size, layer count, edge count). Don't use commitments if this metadata must remain secret.
+</Warning>
+
+<Note>
+  **Public key binding**: The commitment includes `pk.H_digest` and `pk.canon_tag`. Ciphertexts encrypted under different public keys will have different commitments even if they encrypt the same value.
+</Note>
+
+<Warning>
+  **Deterministic**: Encrypting the same value multiple times produces different ciphertexts (due to randomness), which will have different commitments. This can leak information if not carefully managed.
+</Warning>
+
+---
+
+## Performance
+
+Commitment computation time is proportional to the ciphertext size:
+
+- **Fixed cost**: ~1 KB hashed for public key and metadata
+- **Per layer**: ~50-100 bytes (depending on rule type)
+- **Per edge**: ~200-500 bytes (depending on slot count and sigma bits)
+
+For typical ciphertexts:
+- Small ciphertexts (few edges): < 1 microsecond
+- Large ciphertexts (100s of edges): < 100 microseconds
+
+SHA-256 is highly optimized on modern CPUs and is not typically a bottleneck.
+
+---
+
+## Comparison with other commitments
+
+| Property | `commit_ct` | Pedersen commitment | Hash commitment |
+|----------|-------------|---------------------|------------------|
+| Binding | ✓ | ✓ | ✓ |
+| Hiding | ✗ | ✓ | ✓ (with randomness) |
+| Homomorphic | ✗ | ✓ | ✗ |
+| Deterministic | ✓ | ✗ | ✗ (typically) |
+| Quantum-safe | ✓ | ✗ | ✓ |
+
+`commit_ct` is optimized for binding to the full ciphertext structure rather than just the encrypted value. For value-only commitments, consider committing to the decrypted result with added randomness.

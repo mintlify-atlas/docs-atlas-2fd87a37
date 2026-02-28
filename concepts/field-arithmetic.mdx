@@ -1,0 +1,299 @@
+---
+title: Field arithmetic
+description: Understanding the 127-bit prime field used in PVAC-HFHE
+---
+
+PVAC-HFHE performs all arithmetic operations in a 127-bit prime field **F_p** where `p = 2^127 - 1` (a Mersenne prime).
+
+## The prime field F_p
+
+### Field definition
+
+The field is defined by the prime:
+
+```
+p = 2^127 - 1 = 170141183460469231731687303715884105727
+```
+
+This is the largest Mersenne prime that fits in 127 bits.
+
+<Info>
+Using a Mersenne prime enables efficient modular reduction using bit shifts and additions instead of expensive division.
+</Info>
+
+### Field elements
+
+Field elements are represented as 128-bit integers with the top bit always zero:
+
+```cpp
+struct Fp {
+    uint64_t lo;  // Lower 64 bits
+    uint64_t hi;  // Upper 63 bits (bit 63 always 0)
+};
+```
+
+From `include/pvac/core/field.hpp:17-20`:
+
+```cpp
+struct Fp {
+    uint64_t lo;
+    uint64_t hi;
+};
+```
+
+<Note>
+The `hi` field uses only 63 bits. Values are stored in the range `[0, p-1]`.
+</Note>
+
+## Field operations
+
+### Addition
+
+Addition with modular reduction:
+
+```cpp
+Fp fp_add(const Fp& a, const Fp& b) {
+    u128 t0 = (u128)a.lo + (u128)b.lo;
+    uint64_t lo = (uint64_t)t0;
+    u128 t1 = (u128)a.hi + (u128)b.hi + (uint64_t)(t0 >> 64);
+    
+    return fp_from_words(lo, (uint64_t)t1);
+}
+```
+
+From `include/pvac/core/field.hpp:50-56`.
+
+**Steps:**
+1. Add low words with carry
+2. Add high words with propagated carry
+3. Reduce modulo p using `fp_from_words`
+
+### Subtraction
+
+Subtraction via negation:
+
+```cpp
+Fp fp_sub(const Fp& a, const Fp& b) {
+    return fp_add(a, fp_neg(b));
+}
+```
+
+Negation computes `p - a`:
+
+```cpp
+Fp fp_neg(const Fp& a) {
+    u128 Plo = (u128)UINT64_MAX;
+    u128 Phi = (u128)MASK63;  // 2^63 - 1
+    
+    u128 t0 = Plo - a.lo;
+    uint64_t lo = (uint64_t)t0;
+    u128 t1 = Phi - a.hi - (uint64_t)(t0 >> 64);
+    
+    return fp_from_words(lo, (uint64_t)t1);
+}
+```
+
+From `include/pvac/core/field.hpp:58-67`.
+
+### Multiplication
+
+Multiplication uses 128×128 → 256-bit widening multiplication:
+
+```cpp
+Fp fp_mul(const Fp& a, const Fp& b) {
+    uint64_t z0, z1, z2, z3;
+    mul128x128(a.lo, a.hi, b.lo, b.hi, z0, z1, z2, z3);
+    return fp_reduce256(z0, z1, z2, z3);
+}
+```
+
+From `include/pvac/core/field.hpp:209-213`.
+
+**Implementation:**
+- Uses platform-specific optimizations (x86 assembly, MSVC intrinsics, or portable 128-bit)
+- Computes full 256-bit product
+- Reduces modulo `2^127 - 1` efficiently
+
+<Tip>
+The x86 assembly version uses native `mulq` instructions for maximum performance.
+</Tip>
+
+### Reduction modulo p
+
+The reduction algorithm exploits the Mersenne prime structure:
+
+```cpp
+Fp fp_reduce256(uint64_t z0, uint64_t z1, uint64_t z2, uint64_t z3) {
+    // Split into low 127 bits and high bits
+    uint64_t L0 = z0;
+    uint64_t L1 = z1 & MASK63;
+    
+    uint64_t H0 = (z1 >> 63) | (z2 << 1);
+    uint64_t H1 = (z2 >> 63) | (z3 << 1);
+    uint64_t H2 = (z3 >> 63);
+    
+    // Add high part to low part (since 2^127 ≡ 1 mod p)
+    u128 t0 = (u128)L0 + (u128)H0;
+    uint64_t x0 = (uint64_t)t0;
+    uint64_t c0 = (uint64_t)(t0 >> 64);
+    
+    u128 t1 = (u128)L1 + (u128)H1 + (u128)c0;
+    uint64_t x1 = (uint64_t)t1;
+    uint64_t c1 = (uint64_t)(t1 >> 64);
+    
+    uint64_t x2 = H2 + c1;
+    
+    // Final reduction step
+    uint64_t YL0 = x0;
+    uint64_t YL1 = x1 & MASK63;
+    uint64_t YH0 = (x1 >> 63) | (x2 << 1);
+    
+    u128 s0 = (u128)YL0 + (u128)YH0;
+    uint64_t y0 = (uint64_t)s0;
+    uint64_t cy = (uint64_t)(s0 >> 64);
+    uint64_t y1 = YL1 + cy;
+    
+    return fp_from_words(y0, y1);
+}
+```
+
+From `include/pvac/core/field.hpp:179-207`.
+
+**Key insight:** Since `2^127 ≡ 1 (mod p)`, we can reduce by adding the high bits to the low bits.
+
+### Inversion
+
+Inversion uses Fermat's Little Theorem: `a^(p-1) ≡ 1 (mod p)`, so `a^(-1) = a^(p-2)`.
+
+```cpp
+Fp fp_inv(const Fp& a) {
+    return fp_inv_ct(a);
+}
+```
+
+The constant-time implementation uses a windowed exponentiation algorithm:
+
+```cpp
+Fp fp_inv_ct(const Fp& a) {
+    constexpr int W = 5;
+    constexpr int T = 1 << W;  // 32 entries
+    
+    // Precompute table: a^1, a^2, ..., a^31
+    Fp tbl[T];
+    tbl[0] = fp_from_u64(1);
+    tbl[1] = a;
+    
+    for (int i = 2; i < T; i++) {
+        tbl[i] = fp_mul(tbl[i - 1], a);
+    }
+    
+    // Exponentiate by p-2 = 2^127 - 3
+    u128 e = (((u128)1) << 127) - 3;
+    Fp r = fp_from_u64(1);
+    // ... windowed exponentiation ...
+    
+    return r;
+}
+```
+
+From `include/pvac/core/field.hpp:229-269`.
+
+<Warning>
+Inversion is constant-time to prevent timing side-channels, but it's expensive (~100× slower than multiplication).
+</Warning>
+
+## Why this field?
+
+### Advantages of F_(2^127 - 1)
+
+1. **Mersenne prime**: Fast reduction using bit operations
+2. **Large enough**: 127 bits provides ample space for computations
+3. **Multiplicative group**: `p-1 = 2^127 - 2` is divisible by many small factors
+4. **No NTT constraints**: Unlike RLWE schemes, no need for NTT-friendly primes
+
+### Multiplicative group structure
+
+The multiplicative group has order `p - 1 = 2^127 - 2`.
+
+Key generation requires finding a generator `g` of a subgroup of order `B = 337`:
+
+From `include/pvac/core/types.hpp:40`:
+```cpp
+int B = 337;  // Multiplicative group carrier
+```
+
+<Info>
+The parameter `B` is chosen so that `B | (p-1)`, enabling efficient subgroup operations. The value 337 is a prime that divides `2^127 - 2`.
+</Info>
+
+The public key stores precomputed powers:
+
+```cpp
+std::vector<Fp> powg_B;  // [g^0, g^1, g^2, ..., g^336]
+```
+
+This enables fast lookups during encryption and homomorphic operations.
+
+## Vector operations
+
+For batching (multi-slot encryption), operations extend element-wise:
+
+```cpp
+static std::vector<Fp> add(const std::vector<Fp>& a, const std::vector<Fp>& b) {
+    std::vector<Fp> r(a.size());
+    for (size_t i = 0; i < a.size(); ++i) 
+        r[i] = fp_add(a[i], b[i]);
+    return r;
+}
+```
+
+From `include/pvac/ops/encrypt.hpp:150-154`.
+
+## Performance
+
+Field operation timings on modern x86-64 CPUs:
+
+| Operation | Cycles (approx) | Notes |
+|-----------|----------------|-------|
+| Addition | ~10 | With reduction |
+| Subtraction | ~15 | Via negation |
+| Multiplication | ~30 | Using native mulq |
+| Inversion | ~3000 | Constant-time exponentiation |
+
+<Tip>
+For best performance, compile with `-march=native` to enable platform-specific optimizations.
+</Tip>
+
+## Code example
+
+```cpp
+#include <pvac/core/field.hpp>
+
+using namespace pvac;
+
+int main() {
+    // Create field elements
+    Fp a = fp_from_u64(42);
+    Fp b = fp_from_u64(17);
+    
+    // Arithmetic operations
+    Fp sum = fp_add(a, b);         // 42 + 17 = 59
+    Fp diff = fp_sub(a, b);        // 42 - 17 = 25
+    Fp prod = fp_mul(a, b);        // 42 * 17 = 714
+    Fp inv = fp_inv(a);            // 42^(-1) mod p
+    Fp ratio = fp_mul(a, fp_inv(b)); // 42 / 17 mod p
+    
+    return 0;
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Encryption scheme" icon="lock" href="/concepts/encryption-scheme">
+    Learn how field elements are encrypted
+  </Card>
+  <Card title="Homomorphic operations" icon="function" href="/concepts/homomorphic-operations">
+    Understand operations on encrypted data
+  </Card>
+</CardGroup>

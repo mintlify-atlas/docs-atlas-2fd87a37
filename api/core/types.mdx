@@ -1,0 +1,483 @@
+---
+title: Types
+description: Core types and structures used in PVAC-HFHE
+---
+
+## Overview
+
+This module defines the fundamental types, structures, and enumerations used throughout PVAC-HFHE, including cryptographic keys, ciphertexts, parameters, and graph structures for homomorphic operations.
+
+## Structures
+
+### Params
+
+Parameters controlling the security and performance of the PVAC-HFHE scheme.
+
+```cpp
+struct Params {
+    int B = 337;
+    int m_bits = 8192;
+    int n_bits = 16384;
+    int h_col_wt = 192;
+    int x_col_wt = 128;
+    int err_wt = 128;
+    double noise_entropy_bits = 120.0;
+    double tuple2_fraction = 0.55;
+    double depth_slope_bits = 16.0;
+    size_t edge_budget = 1200000;
+    int lpn_n = 4096;
+    int lpn_t = 16384;
+    int lpn_tau_num = 1;
+    int lpn_tau_den = 8;
+    double recrypt_lo = 0.48;
+    double recrypt_hi = 0.52;
+    int recrypt_rounds = 8;
+};
+```
+
+<ParamField path="B" type="int" default="337">
+  Multiplicative group carrier for homomorphic properties
+</ParamField>
+
+<ParamField path="m_bits" type="int" default="8192">
+  Dimension parameter m in bits
+</ParamField>
+
+<ParamField path="n_bits" type="int" default="16384">
+  Dimension parameter n in bits
+</ParamField>
+
+<ParamField path="h_col_wt" type="int" default="192">
+  Column weight for H matrix
+</ParamField>
+
+<ParamField path="x_col_wt" type="int" default="128">
+  Column weight for x matrix
+</ParamField>
+
+<ParamField path="err_wt" type="int" default="128">
+  Error weight parameter
+</ParamField>
+
+<ParamField path="noise_entropy_bits" type="double" default="120.0">
+  Noise entropy in bits for security
+</ParamField>
+
+<ParamField path="tuple2_fraction" type="double" default="0.55">
+  Fraction parameter for tuple generation
+</ParamField>
+
+<ParamField path="depth_slope_bits" type="double" default="16.0">
+  Depth slope parameter in bits
+</ParamField>
+
+<ParamField path="edge_budget" type="size_t" default="1200000">
+  Maximum number of edges in computation graph
+</ParamField>
+
+<ParamField path="lpn_n" type="int" default="4096">
+  LPN dimension parameter
+</ParamField>
+
+<ParamField path="lpn_t" type="int" default="16384">
+  LPN sample count parameter
+</ParamField>
+
+<ParamField path="lpn_tau_num" type="int" default="1">
+  LPN noise rate numerator (τ = lpn_tau_num / lpn_tau_den)
+</ParamField>
+
+<ParamField path="lpn_tau_den" type="int" default="8">
+  LPN noise rate denominator (τ = 1/8)
+</ParamField>
+
+<ParamField path="recrypt_lo" type="double" default="0.48">
+  Lower bound for recryption threshold
+</ParamField>
+
+<ParamField path="recrypt_hi" type="double" default="0.52">
+  Upper bound for recryption threshold
+</ParamField>
+
+<ParamField path="recrypt_rounds" type="int" default="8">
+  Number of recryption rounds
+</ParamField>
+
+<Note>
+  The default parameters provide:
+  - Information-theoretic security: 2226 bits
+  - Classical security: 200+ bits
+  - Quantum security: 100+ bits
+</Note>
+
+### Fp
+
+Field element represented as a 127-bit integer using two 64-bit words.
+
+```cpp
+struct Fp {
+    uint64_t lo;
+    uint64_t hi;
+};
+```
+
+<ParamField path="lo" type="uint64_t">
+  Low 64 bits of the field element
+</ParamField>
+
+<ParamField path="hi" type="uint64_t">
+  High 63 bits of the field element (top bit unused)
+</ParamField>
+
+<Note>
+  Fp represents elements in the field modulo 2^127 - 1 (Mersenne prime p = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF).
+</Note>
+
+### PubKey
+
+Public key for encryption and evaluation.
+
+```cpp
+struct PubKey {
+    Params prm;
+    uint64_t canon_tag;
+    std::vector<BitVec> H;
+    Ubk ubk;
+    std::array<uint8_t, 32> H_digest;
+    Fp omega_B;
+    std::vector<Fp> powg_B;
+};
+```
+
+<ParamField path="prm" type="Params">
+  Scheme parameters
+</ParamField>
+
+<ParamField path="canon_tag" type="uint64_t">
+  Canonical tag for key identification
+</ParamField>
+
+<ParamField path="H" type="std::vector<BitVec>">
+  Public matrix H for LPN-based encryption
+</ParamField>
+
+<ParamField path="ubk" type="Ubk">
+  Permutation data for universal broadcast
+</ParamField>
+
+<ParamField path="H_digest" type="std::array<uint8_t, 32>">
+  SHA-256 digest of matrix H
+</ParamField>
+
+<ParamField path="omega_B" type="Fp">
+  B-th root of unity in the field
+</ParamField>
+
+<ParamField path="powg_B" type="std::vector<Fp>">
+  Precomputed powers for evaluation
+</ParamField>
+
+### SecKey
+
+Secret key for decryption.
+
+```cpp
+struct SecKey {
+    std::array<uint64_t, 4> prf_k;
+    std::vector<uint64_t> lpn_s_bits;
+};
+```
+
+<ParamField path="prf_k" type="std::array<uint64_t, 4>">
+  PRF key for pseudorandom generation (256 bits)
+</ParamField>
+
+<ParamField path="lpn_s_bits" type="std::vector<uint64_t>">
+  LPN secret vector in packed bit format
+</ParamField>
+
+### Cipher
+
+Ciphertext structure representing encrypted data and computation graph.
+
+```cpp
+struct Cipher {
+    std::vector<Layer> L;
+    std::vector<Edge> E;
+    std::vector<Fp> c0;
+    size_t slots = 1;
+};
+```
+
+<ParamField path="L" type="std::vector<Layer>">
+  Computation layers in the DAG
+</ParamField>
+
+<ParamField path="E" type="std::vector<Edge>">
+  Edges connecting layers in the computation graph
+</ParamField>
+
+<ParamField path="c0" type="std::vector<Fp>">
+  Base ciphertext vector
+</ParamField>
+
+<ParamField path="slots" type="size_t" default="1">
+  Number of message slots (for batching)
+</ParamField>
+
+### Layer
+
+Computation layer in the evaluation graph.
+
+```cpp
+struct Layer {
+    RRule rule;
+    RSeed seed;
+    uint32_t pa;
+    uint32_t pb;
+};
+```
+
+<ParamField path="rule" type="RRule">
+  Computation rule type (BASE or PROD)
+</ParamField>
+
+<ParamField path="seed" type="RSeed">
+  Random seed for deterministic randomness expansion
+</ParamField>
+
+<ParamField path="pa" type="uint32_t">
+  Parent index A
+</ParamField>
+
+<ParamField path="pb" type="uint32_t">
+  Parent index B
+</ParamField>
+
+### Edge
+
+Edge in the computation graph with associated weights.
+
+```cpp
+struct Edge {
+    uint32_t layer_id;
+    uint16_t idx;
+    uint8_t ch;
+    std::vector<Fp> w;
+    BitVec s;
+};
+```
+
+<ParamField path="layer_id" type="uint32_t">
+  Index of the layer this edge connects to
+</ParamField>
+
+<ParamField path="idx" type="uint16_t">
+  Edge index within the layer
+</ParamField>
+
+<ParamField path="ch" type="uint8_t">
+  Sign/channel indicator (SGN_P or SGN_M)
+</ParamField>
+
+<ParamField path="w" type="std::vector<Fp>">
+  Weight vector in the field
+</ParamField>
+
+<ParamField path="s" type="BitVec">
+  Binary selection vector
+</ParamField>
+
+### EvalKey
+
+Evaluation key for homomorphic operations.
+
+```cpp
+struct EvalKey {
+    std::vector<Cipher> zero_pool;
+    Cipher enc_one;
+};
+```
+
+<ParamField path="zero_pool" type="std::vector<Cipher>">
+  Pool of zero encryptions for noise refreshing
+</ParamField>
+
+<ParamField path="enc_one" type="Cipher">
+  Encryption of the value 1
+</ParamField>
+
+### Nonce128
+
+128-bit nonce for randomization.
+
+```cpp
+struct Nonce128 {
+    uint64_t lo;
+    uint64_t hi;
+};
+```
+
+<ParamField path="lo" type="uint64_t">
+  Low 64 bits
+</ParamField>
+
+<ParamField path="hi" type="uint64_t">
+  High 64 bits
+</ParamField>
+
+### RSeed
+
+Random seed structure.
+
+```cpp
+struct RSeed {
+    uint64_t ztag;
+    Nonce128 nonce;
+};
+```
+
+<ParamField path="ztag" type="uint64_t">
+  Tag for domain separation
+</ParamField>
+
+<ParamField path="nonce" type="Nonce128">
+  128-bit nonce
+</ParamField>
+
+### Ubk
+
+Permutation data for universal broadcast key.
+
+```cpp
+struct Ubk {
+    std::vector<int> perm;
+    std::vector<int> inv;
+};
+```
+
+<ParamField path="perm" type="std::vector<int>">
+  Permutation array
+</ParamField>
+
+<ParamField path="inv" type="std::vector<int>">
+  Inverse permutation array
+</ParamField>
+
+## Enumerations
+
+### RRule
+
+Computation rule type for layers.
+
+```cpp
+enum class RRule : uint8_t {
+    BASE = 0,
+    PROD = 1
+};
+```
+
+<ResponseField name="BASE" type="0">
+  Base layer (input)
+</ResponseField>
+
+<ResponseField name="PROD" type="1">
+  Product layer (multiplication)
+</ResponseField>
+
+### EdgeSign
+
+Sign indicator for edges.
+
+```cpp
+enum EdgeSign : uint8_t {
+    SGN_P = 0,
+    SGN_M = 1
+};
+```
+
+<ResponseField name="SGN_P" type="0">
+  Positive sign
+</ResponseField>
+
+<ResponseField name="SGN_M" type="1">
+  Negative sign (minus)
+</ResponseField>
+
+## Functions
+
+### make_nonce128
+
+Generates a random 128-bit nonce.
+
+```cpp
+Nonce128 make_nonce128();
+```
+
+<ResponseField name="return" type="Nonce128">
+  Cryptographically secure random nonce
+</ResponseField>
+
+### sgn_val
+
+Converts edge sign to integer value.
+
+```cpp
+int sgn_val(uint8_t ch);
+```
+
+<ParamField path="ch" type="uint8_t">
+  Edge sign (SGN_P or SGN_M)
+</ParamField>
+
+<ResponseField name="return" type="int">
+  Returns +1 for SGN_P, -1 for SGN_M
+</ResponseField>
+
+### rand_fp_nonzero
+
+Generates a random non-zero field element.
+
+```cpp
+Fp rand_fp_nonzero();
+```
+
+<ResponseField name="return" type="Fp">
+  Random non-zero field element
+</ResponseField>
+
+<Note>
+  This function loops until a non-zero element is generated.
+</Note>
+
+## Domain Separation Constants
+
+The `Dom` namespace provides string constants for domain separation in cryptographic operations:
+
+```cpp
+namespace Dom {
+    inline constexpr const char* H_GEN = "pvac.dom.h_gen";
+    inline constexpr const char* X_SEED = "pvac.dom.x_seed";
+    inline constexpr const char* NOISE = "pvac.dom.noise";
+    inline constexpr const char* PRF_LPN = "pvac.dom.prf_lpn";
+    inline constexpr const char* TOEP = "pvac.dom.toeplitz";
+    inline constexpr const char* ZTAG = "pvac.dom.ztag";
+    inline constexpr const char* COMMIT = "pvac.dom.commit";
+    inline constexpr const char* PRF_R1 = "pvac.prf.r.1";
+    inline constexpr const char* PRF_R2 = "pvac.prf.r.2";
+    inline constexpr const char* PRF_R3 = "pvac.prf.r.3";
+    inline constexpr const char* PRF_NOISE1 = "pvac.prf.noise.1";
+    inline constexpr const char* PRF_NOISE2 = "pvac.prf.noise.2";
+    inline constexpr const char* PRF_NOISE3 = "pvac.prf.noise.3";
+}
+```
+
+<Warning>
+  These domain separation constants are critical for security. Never modify them unless you fully understand the cryptographic implications.
+</Warning>
+
+## Related
+
+- [Field operations](/api/core/field)
+- [BitVec operations](/api/core/bitvec)
+- [Random generation](/api/core/random)

@@ -1,0 +1,209 @@
+---
+title: Configuration
+description: Global configuration and debug settings for PVAC-HFHE
+---
+
+## Overview
+
+This module provides global configuration settings for PVAC-HFHE, primarily focused on debug output control. The debug level can be configured via environment variables or programmatically.
+
+## Global variables
+
+### g_dbg
+
+Global debug level variable.
+
+```cpp
+inline int g_dbg;
+```
+
+<ResponseField name="value" type="int">
+  Current debug level (0-2)
+</ResponseField>
+
+The debug level controls the verbosity of output:
+
+<ResponseField name="0" type="Silent">
+  No debug output
+</ResponseField>
+
+<ResponseField name="1" type="Normal">
+  Standard debug output (default)
+</ResponseField>
+
+<ResponseField name="2" type="Verbose">
+  Detailed debug output with additional information
+</ResponseField>
+
+<Note>
+  The debug level is automatically initialized from environment variables on first use.
+</Note>
+
+## Functions
+
+### set_debug_level
+
+Sets the global debug level programmatically.
+
+```cpp
+void set_debug_level(int level);
+```
+
+<ParamField path="level" type="int">
+  Desired debug level (will be clamped to range [0, 2])
+</ParamField>
+
+**Example:**
+```cpp
+// Disable all debug output
+set_debug_level(0);
+
+// Enable verbose output
+set_debug_level(2);
+
+// Set to normal (default) level
+set_debug_level(1);
+```
+
+<Note>
+  Values outside the range [0, 2] are automatically clamped to the nearest valid value.
+</Note>
+
+### get_debug_level
+
+Retrieves the current debug level.
+
+```cpp
+int get_debug_level();
+```
+
+<ResponseField name="return" type="int">
+  Current debug level (0-2)
+</ResponseField>
+
+**Example:**
+```cpp
+int current_level = get_debug_level();
+if (current_level >= 1) {
+    std::cout << "Debug output is enabled" << std::endl;
+}
+```
+
+## Environment variables
+
+### PVAC_DBG
+
+Primary environment variable for setting the debug level.
+
+```bash
+export PVAC_DBG=2  # Verbose output
+export PVAC_DBG=1  # Normal output (default)
+export PVAC_DBG=0  # Silent mode
+```
+
+<Note>
+  This variable is checked first during initialization.
+</Note>
+
+### HFHE_DBG
+
+Fallback environment variable for backward compatibility.
+
+```bash
+export HFHE_DBG=1
+```
+
+<Note>
+  If `PVAC_DBG` is not set, `HFHE_DBG` will be used instead.
+</Note>
+
+## Initialization
+
+The debug level is initialized automatically on first access using the following logic:
+
+1. Check if `PVAC_DBG` environment variable is set
+2. If not, check if `HFHE_DBG` environment variable is set
+3. If neither is set, default to level 1 (normal)
+4. Clamp the value to the range [0, 2]
+
+**Example:**
+```bash
+# Run with verbose debug output
+PVAC_DBG=2 ./my_program
+
+# Run in silent mode
+PVAC_DBG=0 ./my_program
+
+# Use default (normal) level
+./my_program
+```
+
+## Usage patterns
+
+### Conditional debug output
+
+```cpp
+if (get_debug_level() >= 1) {
+    std::cout << "Generating keys..." << std::endl;
+}
+
+if (get_debug_level() >= 2) {
+    std::cout << "Key generation details:" << std::endl;
+    std::cout << "  m_bits: " << params.m_bits << std::endl;
+    std::cout << "  n_bits: " << params.n_bits << std::endl;
+}
+```
+
+### Runtime configuration
+
+```cpp
+// Save current level
+int saved_level = get_debug_level();
+
+// Temporarily disable debug output
+set_debug_level(0);
+
+// ... perform operations ...
+
+// Restore previous level
+set_debug_level(saved_level);
+```
+
+### Library initialization
+
+```cpp
+void initialize_library(int debug_level = 1) {
+    set_debug_level(debug_level);
+    
+    if (get_debug_level() >= 1) {
+        std::cout << "PVAC-HFHE initialized" << std::endl;
+    }
+}
+```
+
+## Best practices
+
+<Note>
+  **For library users:**
+  - Set the debug level early in your program's initialization
+  - Use environment variables for quick testing without recompilation
+  - Set level 0 for production deployments
+</Note>
+
+<Note>
+  **For library developers:**
+  - Use level 1 for important operations (key generation, encryption, etc.)
+  - Use level 2 for detailed algorithmic steps
+  - Always check the debug level before expensive string formatting
+</Note>
+
+## Thread safety
+
+<Warning>
+  The debug level is stored in a global variable. Changing it from multiple threads without synchronization may result in race conditions. If thread safety is required, wrap calls to `set_debug_level()` in appropriate synchronization primitives.
+</Warning>
+
+## Related
+
+- [Types](/api/core/types) - Core types and structures
+- [Random generation](/api/core/random) - Random number generation

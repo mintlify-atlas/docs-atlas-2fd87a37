@@ -1,0 +1,259 @@
+---
+title: 'Metrics'
+description: 'Performance measurement and ciphertext analysis utilities'
+icon: 'chart-line'
+---
+
+## Overview
+
+The metrics utilities provide functions for measuring ciphertext characteristics, validating homomorphic operations, and collecting performance data. These functions are primarily used for debugging, optimization, and analysis of PVAC-HFHE operations.
+
+## Functions
+
+### dump_metrics
+
+Writes ciphertext metrics to a CSV file for analysis and debugging.
+
+```cpp
+void dump_metrics(
+    const PubKey & pk,
+    const char * tag,
+    const Cipher & C,
+    const Fp & val
+)
+```
+
+<ParamField path="pk" type="const PubKey &" required>
+  The public key used for density calculations
+</ParamField>
+
+<ParamField path="tag" type="const char *" required>
+  String identifier for this metric entry (e.g., "after_mul", "before_recrypt")
+</ParamField>
+
+<ParamField path="C" type="const Cipher &" required>
+  The ciphertext to measure
+</ParamField>
+
+<ParamField path="val" type="const Fp &" required>
+  The actual plaintext value (for verification purposes)
+</ParamField>
+
+#### Behavior
+
+- Creates or appends to `pvac_metrics.csv` in the current directory
+- CSV columns: `tag`, `edges`, `layers`, `sigma_density`, `value_lo`, `value_hi`
+- Thread-safe with static initialization
+- Silently fails if file cannot be opened
+
+#### Example output
+
+```csv
+tag,edges,layers,sigma_density,value_lo,value_hi
+after_mul,2400,3,0.485231,42,0
+before_recrypt,4800,5,0.512847,100,0
+after_recrypt,1200,3,0.478934,100,0
+```
+
+<Note>
+This function is intended for development and debugging. Remove calls to `dump_metrics` in production code to avoid file I/O overhead.
+</Note>
+
+---
+
+### sigma_density
+
+Calculates the density of noise in a ciphertext by measuring the proportion of set bits in the sigma vectors.
+
+```cpp
+double sigma_density(const PubKey& pk, const Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey &" required>
+  The public key (used to access `prm.m_bits`)
+</ParamField>
+
+<ParamField path="C" type="const Cipher &" required>
+  The ciphertext to analyze
+</ParamField>
+
+<ResponseField name="return" type="double">
+  The density value between 0.0 and 1.0, representing the fraction of set bits across all edge sigma vectors. Returns 0.0 if the ciphertext has no edges.
+</ResponseField>
+
+#### Calculation
+
+For a ciphertext with edges E₁, E₂, ..., Eₙ:
+
+```
+density = (∑ popcount(Eᵢ.s)) / (n × m_bits)
+```
+
+where `popcount(Eᵢ.s)` is the number of set bits in the sigma bitvector of edge i.
+
+#### Usage
+
+Density monitoring is critical for determining when to trigger recryption:
+
+```cpp
+Cipher result = mul(pk, evk, A, B);
+double d = sigma_density(pk, result);
+
+if (d > 0.52) {
+    result = recrypt(pk, evk, result);
+}
+```
+
+<Note>
+Density values approaching 0.5 indicate high noise levels. The PVAC-HFHE scheme typically triggers recryption when density exceeds 0.48-0.52.
+</Note>
+
+---
+
+### sigma_shannon
+
+Computes the Shannon entropy of byte values in the ciphertext's sigma vectors to assess randomness quality.
+
+```cpp
+double sigma_shannon(const Cipher& C)
+```
+
+<ParamField path="C" type="const Cipher &" required>
+  The ciphertext to analyze
+</ParamField>
+
+<ResponseField name="return" type="double">
+  Shannon entropy in bits (0.0 to 8.0). Higher values indicate better randomness. Returns 0.0 for empty ciphertexts.
+</ResponseField>
+
+#### Calculation
+
+For byte frequency distribution p₁, p₂, ..., p₂₅₆:
+
+```
+H = -∑ pᵢ × log₂(pᵢ)
+```
+
+- Maximum entropy: 8.0 bits (perfectly random)
+- Low entropy: < 6.0 bits (may indicate weak randomness)
+
+#### Use cases
+
+- Validating noise generation quality
+- Detecting potential side-channel vulnerabilities
+- Analyzing ciphertext compressibility
+
+<Note>
+This function examines the raw byte representation of sigma vectors, not the mathematical field elements. It's primarily used for cryptographic analysis rather than operational decisions.
+</Note>
+
+---
+
+### agg_layer_gsum
+
+Aggregates the weighted sum of edges in a specific layer, used for internal validation.
+
+```cpp
+std::vector<Fp> agg_layer_gsum(
+    const PubKey& pk,
+    const Cipher& X,
+    uint32_t lid
+)
+```
+
+<ParamField path="pk" type="const PubKey &" required>
+  The public key containing generator powers (`powg_B`)
+</ParamField>
+
+<ParamField path="X" type="const Cipher &" required>
+  The ciphertext to analyze
+</ParamField>
+
+<ParamField path="lid" type="uint32_t" required>
+  The layer ID to aggregate
+</ParamField>
+
+<ResponseField name="return" type="std::vector<Fp>">
+  A vector of field elements (length `X.slots`) representing the aggregated values for each slot in the specified layer.
+</ResponseField>
+
+#### Algorithm
+
+For each edge e in layer `lid`:
+
+```
+s[j] = ∑ sgn(e.ch) × e.w[j] × g^(e.idx)
+```
+
+where `sgn(e.ch)` is +1 for positive edges, -1 for negative edges.
+
+<Note>
+This function is primarily used internally by `check_mul_gsum_all` for validation. It's not typically needed in application code.
+</Note>
+
+---
+
+### check_mul_gsum_all
+
+Verifies the correctness of a homomorphic multiplication by checking all layer products.
+
+```cpp
+bool check_mul_gsum_all(
+    const PubKey & pk,
+    const Cipher & A,
+    const Cipher & B,
+    const Cipher & C
+)
+```
+
+<ParamField path="pk" type="const PubKey &" required>
+  The public key used for computation
+</ParamField>
+
+<ParamField path="A" type="const Cipher &" required>
+  First multiplicand ciphertext
+</ParamField>
+
+<ParamField path="B" type="const Cipher &" required>
+  Second multiplicand ciphertext
+</ParamField>
+
+<ParamField path="C" type="const Cipher &" required>
+  Product ciphertext (should equal A × B)
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  `true` if the multiplication is valid across all layer combinations, `false` if any discrepancy is detected.
+</ResponseField>
+
+#### Validation logic
+
+For each pair of layers (la, lb) from A and B:
+
+1. Compute the expected product layer index in C
+2. Aggregate the layer sums using `agg_layer_gsum`
+3. Verify that `C[lc] = A[la] × B[lb]` element-wise
+
+#### Use cases
+
+- Testing multiplication correctness during development
+- Debugging homomorphic operation issues
+- Validating parameter choices
+
+<Note>
+This is a computationally expensive validation function. Use it only during testing, not in production code paths.
+</Note>
+
+---
+
+## Related functions
+
+- [`sigma_density`](/api/ops/encrypt#sigma_density) - Defined in `ops/encrypt.hpp`, also available here for convenience
+- [`recrypt`](/api/ops/recrypt) - Uses density metrics to determine when recryption is needed
+- [`mul`](/api/ops/multiply) - Validated by `check_mul_gsum_all`
+
+## Source location
+
+```
+include/pvac/utils/metrics.hpp
+```

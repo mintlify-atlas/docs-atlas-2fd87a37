@@ -1,0 +1,448 @@
+---
+title: Performance tuning
+description: Optimize PVAC-HFHE performance with benchmark data and tuning strategies
+---
+
+This guide provides detailed performance benchmarks and optimization techniques for PVAC-HFHE based on real measurements.
+
+## Performance overview
+
+PVAC-HFHE excels at shallow circuits and scalar operations. From benchmark data:
+
+### Core operations
+
+| Operation | PVAC-HFHE | BFV | BGV | CKKS | Speedup |
+|-----------|-----------|-----|-----|------|----------|
+| Scalar add | 0.012ms | 0.124ms | 0.552ms | 1.050ms | **10-87x faster** |
+| Scalar mul | 2.47ms | 18.28ms | 17.61ms | 35.23ms | **7.4-14.3x faster** |
+| Dot product (n=32) | 80.27ms | 598.94ms | 626.17ms | 1218.69ms | **7.5x faster** |
+
+<Note>
+  All benchmarks from `benchmarks/README.md` running on DigitalOcean Premium AMD 8-core 2.0GHz with g++ -O3 -march=native.
+</Note>
+
+## Key generation performance
+
+From `benchmarks/README.md:191-200`:
+
+```
+Operation      PVAC-HFHE    BFV      BGV      CKKS
+Keygen         858.95ms     38.43ms  62.03ms  143.61ms
+Encrypt        84.11ms      10.91ms  12.70ms  23.34ms
+Decrypt        13.38ms      2.54ms   3.48ms   10.37ms
+```
+
+### Optimization tips
+
+<Warning>
+  Current implementation is an unoptimized proof-of-concept. Key generation is 22x slower than BFV but only runs once per session.
+</Warning>
+
+**Mitigation strategies:**
+
+1. **Cache keys**: Generate once, serialize to disk
+2. **Precompute powers**: The `powg_B` table is the bottleneck
+3. **Parallel generation**: H matrix generation can be parallelized
+
+```cpp
+// Generate once and save
+keygen(prm, pk, sk);
+save_keys("keys.bin", pk, sk);
+
+// Later sessions: load instead of regenerate
+load_keys("keys.bin", pk, sk);  // Much faster
+```
+
+## Encryption performance
+
+### Single value encryption
+
+From benchmark data:
+- **Time**: 84.11ms (mean)
+- **Stddev**: 2.08ms
+- **vs BFV**: 8x slower
+- **vs CKKS**: 3.6x faster
+
+**Optimization:**
+
+```cpp
+// Bad: Encrypt in loop
+for (int i = 0; i < 100; i++) {
+    Cipher ct = enc_value(pk, sk, values[i]);  // 8.4 seconds total
+    // ...
+}
+
+// Better: Batch with enc_values
+Cipher ct = enc_values(pk, sk, values);  // Single operation
+```
+
+### Depth hint optimization
+
+From `include/pvac/ops/encrypt.hpp:732-738`:
+
+```cpp
+// Default: depth 0 (fastest)
+Cipher ct0 = enc_value(pk, sk, 42);  // ~84ms
+
+// Depth 3 (slower but supports deeper circuits)
+Cipher ct3 = enc_value_depth(pk, sk, 42, 3);  // ~120ms (estimated)
+```
+
+**Best practice:**
+
+- Use depth 0 for additions only
+- Use depth 1-2 for shallow multiplications
+- Use depth 3+ only when necessary
+
+<Tip>
+  Profile your circuit depth first, then use the minimum required depth hint to minimize encryption overhead.
+</Tip>
+
+## Addition performance
+
+From benchmark data:
+- **Time**: 0.012ms (12 microseconds)
+- **vs BFV**: 10x faster
+- **vs CKKS**: 87x faster
+
+### Why so fast?
+
+From `include/pvac/ops/arithmetic.hpp:165-188`, addition is pure graph concatenation:
+
+```cpp
+inline Cipher ct_add(const PubKey& pk, const Cipher& A, const Cipher& B) {
+    Cipher C;
+    C.slots = A.slots;
+    C.c0 = A.c0.empty() ? B.c0 : B.c0.empty() ? A.c0 : field::Op::add(A.c0, B.c0);
+    
+    // Just concatenate layers and edges
+    C.L = A.L;
+    C.L.insert(C.L.end(), B.L.begin(), B.L.end());
+    C.E = A.E;
+    C.E.insert(C.E.end(), B.E.begin(), B.E.end());
+    
+    compact_layers(C);
+    return C;
+}
+```
+
+No field operations, no PRFs, just memory operations.
+
+**Exploit this:**
+
+```cpp
+// Summing 100 values
+auto t1 = std::chrono::high_resolution_clock::now();
+Cipher sum = enc_value(pk, sk, 0);
+for (int i = 0; i < 100; i++) {
+    sum = ct_add(pk, sum, enc_value(pk, sk, i));
+}
+auto t2 = std::chrono::high_resolution_clock::now();
+// Total: ~8.4s (dominated by 100 encryptions)
+// Additions: ~1.2ms total (negligible)
+```
+
+## Multiplication performance
+
+From benchmark data:
+- **Time**: 2.47ms (mean)
+- **vs BFV shallow**: 2.9x faster (7.23ms)
+- **vs BFV leveled**: 7.4x faster (18.28ms)
+- **vs CKKS**: 14.3x faster (35.23ms)
+
+### Depth performance
+
+From `benchmarks/README.md:88-98`:
+
+```
+Depth  Time     CT Size   Growth
+d1     2.68ms   34 KB     0.8x
+d2     10.34ms  136 KB    3.2x
+d3     31.46ms  441 KB    10.5x
+d4     97.11ms  1359 KB   32x
+d5     285.83ms 4112 KB   98x
+```
+
+**Exponential degradation** beyond depth 2.
+
+### Optimization strategies
+
+#### 1. Minimize depth
+
+```cpp
+// Bad: depth 3, 285ms
+Cipher bad = ct_mul(pk, ct_mul(pk, ct_mul(pk, a, b), c), d);
+
+// Good: depth 2, 10ms
+Cipher ab = ct_mul(pk, a, b);
+Cipher cd = ct_mul(pk, c, d);
+Cipher good = ct_mul(pk, ab, cd);
+```
+
+#### 2. Use ct_square for x²
+
+From `include/pvac/ops/arithmetic.hpp:227-255`:
+
+```cpp
+// Slower: L × L product layers
+Cipher sq1 = ct_mul(pk, x, x);
+
+// Faster: L × (L+1)/2 layers (triangular)
+Cipher sq2 = ct_square(pk, x);
+```
+
+Savings: ~40% fewer product layers.
+
+#### 3. Tune S parameter
+
+```cpp
+// Default: S=8 (balanced)
+Cipher c1 = ct_mul(pk, a, b);  // Good for most cases
+
+// Smaller S=4 (faster, larger noise)
+Cipher c2 = ct_mul(pk, a, b, 4);  // Use for depth 0-1
+
+// Larger S=16 (slower, smaller noise)
+Cipher c3 = ct_mul(pk, a, b, 16);  // Use for depth 3+
+```
+
+<Note>
+  The S parameter controls edges per product layer. Larger S increases time/size but improves noise distribution.
+</Note>
+
+## Dot product performance
+
+From `benchmarks/README.md:116-124`:
+
+```
+n    PVAC-HFHE  BFV       BGV       CKKS      Speedup
+4    9.61ms     73.24ms   74.55ms   156.53ms  7.6x
+8    19.08ms    149.68ms  152.55ms  308.24ms  7.8x
+16   38.49ms    297.02ms  294.65ms  605.52ms  7.7x
+32   80.27ms    598.94ms  626.17ms  1218.69ms 7.5x
+```
+
+**Implementation:**
+
+```cpp
+Cipher dot_product(const PubKey& pk, const SecKey& sk,
+                   const std::vector<uint64_t>& a,
+                   const std::vector<uint64_t>& b) {
+    Cipher sum = enc_value(pk, sk, 0);
+    for (size_t i = 0; i < a.size(); i++) {
+        Cipher ca = enc_value(pk, sk, a[i]);
+        Cipher cb = enc_value(pk, sk, b[i]);
+        sum = ct_add(pk, sum, ct_mul(pk, ca, cb));
+    }
+    return sum;
+}
+```
+
+**Complexity:**
+- n encryptions of a: n × 84ms
+- n encryptions of b: n × 84ms  
+- n multiplications: n × 2.47ms
+- n additions: n × 0.012ms (negligible)
+- **Total**: ~168n ms for PVAC vs ~2300n ms for BFV
+
+## Polynomial evaluation
+
+For f(x) = 3x³ + 2x² + 5x + 7:
+
+From `benchmarks/README.md:128-136`:
+
+```
+Scheme       Time      vs PVAC
+PVAC-HFHE    62.88ms   1.0x
+BFV          71.72ms   1.1x slower
+BGV          92.79ms   1.5x slower
+CKKS         182.35ms  2.9x slower
+```
+
+**Optimized implementation:**
+
+```cpp
+// Horner's method: f(x) = ((3x + 2)x + 5)x + 7
+Cipher horner(const PubKey& pk, const SecKey& sk, uint64_t x) {
+    Cipher cx = enc_value(pk, sk, x);
+    
+    Cipher result = ct_mul_const(pk, cx, 3);        // 3x
+    result = ct_add_const(pk, result, 2);           // 3x + 2
+    result = ct_mul(pk, result, cx);                // (3x + 2)x
+    result = ct_add_const(pk, result, 5);           // (3x + 2)x + 5
+    result = ct_mul(pk, result, cx);                // ((3x + 2)x + 5)x
+    result = ct_add_const(pk, result, 7);           // final
+    
+    return result;  // Depth 2, 2 multiplications
+}
+```
+
+Saves multiplications vs naive expansion.
+
+## Ciphertext size optimization
+
+From `benchmarks/README.md:76-86`:
+
+```
+Scheme       Mode      CT Size   vs PVAC
+PVAC-HFHE    scalar    42 KB     1.0x
+BFV          shallow   256 KB    6x larger
+BFV          leveled   1024 KB   24x larger
+BGV          leveled   1792 KB   43x larger
+CKKS         leveled   3584 KB   85x larger
+```
+
+### Compaction
+
+Automatic edge compaction when budget exceeded:
+
+```cpp
+// From include/pvac/ops/encrypt.hpp:709-714
+inline void guard_budget(const PubKey& pk, Cipher& C, const char* ctx) {
+    if (C.E.size() > pk.prm.edge_budget) {  // Default: 1,200,000
+        compact_edges(pk, C);
+    }
+}
+```
+
+**Manual compaction:**
+
+```cpp
+Cipher c = /* ... large ciphertext ... */;
+
+if (c.E.size() > 100000) {
+    compact_edges(pk, c);
+    compact_layers(c);
+}
+```
+
+<Tip>
+  Compaction is expensive (O(E × B)) but can reduce ciphertext size by 50-80% by merging edges.
+</Tip>
+
+## Parallel throughput
+
+From `benchmarks/README.md:175-181`:
+
+```
+Ops    Sequential  Parallel  Speedup  Throughput
+512    1391ms      189ms     7.4x     2711 ops/s
+2048   4963ms      795ms     6.2x     2575 ops/s
+8192   19904ms     2608ms    7.6x     3141 ops/s
+```
+
+**Parallel multiplication:**
+
+```cpp
+#include <omp.h>
+
+// Process 512 multiplications in parallel
+void parallel_mul(const PubKey& pk, const SecKey& sk,
+                  const std::vector<uint64_t>& data) {
+    std::vector<Cipher> results(data.size());
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < data.size(); i++) {
+        Cipher ca = enc_value(pk, sk, data[i]);
+        Cipher cb = enc_value(pk, sk, data[i] * 2);
+        results[i] = ct_mul(pk, ca, cb);
+    }
+}
+```
+
+**Speedup:** ~7.4x on 8 cores.
+
+<Warning>
+  PVAC-HFHE parallelization is coarse-grained (operation-level). RLWE SIMD is 146x faster for fine-grained vectorization.
+</Warning>
+
+## Comparison: PVAC vs bit-level FHE
+
+From `benchmarks/README.md:32-39`:
+
+```
+Operation  PVAC-HFHE  TFHE-rs CPU  TFHE-rs GPU  vs CPU    vs GPU
+Add        0.012ms    109ms        8.97ms       9083x     747x
+Sub        0.012ms    109ms        8.97ms       9083x     747x
+Mul        2.47ms     402ms        31.9ms       163x      13x
+```
+
+**64-bit multiplication estimate:**
+
+From `benchmarks/README.md:150-160`:
+
+```
+Scheme      64-bit Mul   vs PVAC
+PVAC        2.47ms       1.0x
+FHEW        32.48min     789,000x slower
+TFHE        33.47min     813,000x slower
+```
+
+<Note>
+  This comparison is for demonstration only. Bit-level FHE solves different problems (arbitrary boolean circuits) vs PVAC (arithmetic circuits).
+</Note>
+
+## Memory usage
+
+Estimated memory for different operations:
+
+| Operation | Peak memory | Notes |
+|-----------|-------------|--------|
+| Keygen | ~50 MB | Includes H matrix, powg_B |
+| Encrypt (depth 0) | ~2 MB | Temporary allocations |
+| Encrypt (depth 5) | ~8 MB | More noise tuples |
+| ct_mul (depth 2) | ~5 MB | Product layer construction |
+| ct_mul (depth 4) | ~20 MB | Quadratic growth |
+
+<Tip>
+  For memory-constrained environments, use depth 0-2 operations and compact ciphertexts frequently.
+</Tip>
+
+## Benchmarking your code
+
+From `examples/basic_usage.cpp:246-265`:
+
+```cpp
+#include <chrono>
+
+auto t1 = std::chrono::high_resolution_clock::now();
+
+// Your operation here
+Cipher result = ct_mul(pk, a, b);
+
+auto t2 = std::chrono::high_resolution_clock::now();
+auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
+std::cout << "Time: " << ms << " ms\n";
+std::cout << "Edges: " << result.E.size() << "\n";
+std::cout << "Layers: " << result.L.size() << "\n";
+```
+
+## Compiler optimization flags
+
+From `benchmarks/README.md:274`:
+
+```bash
+g++ -std=c++17 -O3 -march=native -fopenmp -o bench main.cpp \
+    -I../pvac/include -L/usr/local/lib -pthread
+```
+
+**Critical flags:**
+- `-O3`: Maximum optimization
+- `-march=native`: CPU-specific instructions (SIMD, AES-NI)
+- `-fopenmp`: Parallel support
+
+<Warning>
+  Without `-march=native`, performance may degrade by 30-50% due to missing PCLMUL instructions for field arithmetic.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Depth management" icon="layer-group" href="/guides/depth-management">
+    Master circuit depth optimization
+  </Card>
+  <Card title="Arithmetic operations" icon="calculator" href="/guides/arithmetic-operations">
+    Learn efficient operation patterns
+  </Card>
+</CardGroup>

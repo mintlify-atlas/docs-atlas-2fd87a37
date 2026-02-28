@@ -1,0 +1,129 @@
+---
+title: Benchmark overview
+description: Performance evaluation of PVAC-HFHE proof of concept against production FHE schemes
+---
+
+This benchmark suite provides a comprehensive evaluation of PVAC-HFHE's performance characteristics. The results compare our early proof of concept implementation against production-optimized FHE libraries from OpenFHE.
+
+<Note>
+PVAC-HFHE is currently a research proof of concept without production optimizations. These benchmarks are provided for hypothesis testing, bounty programs, and academic evaluation.
+</Note>
+
+## Key findings
+
+Even as an unoptimized proof of concept, PVAC-HFHE demonstrates significant performance advantages for scalar arithmetic operations:
+
+### Performance advantages
+
+| Metric | Improvement |
+|--------|-------------|
+| Scalar multiplication vs BFV (shallow) | 2.9x faster |
+| Scalar multiplication vs BFV (leveled) | 7.4x faster |
+| Scalar multiplication vs CKKS | 14.3x faster |
+| Scalar addition | 10-87x faster |
+| Dot product | 7.5-7.8x faster |
+| Ciphertext size (fresh) | 6-85x smaller |
+
+### Scalar operations
+
+**Multiplication (ct × ct):**
+- PVAC-HFHE: 2.47 ms
+- BFV shallow: 7.23 ms (2.9x slower)
+- BFV leveled: 18.28 ms (7.4x slower)
+- BGV: 17.61 ms (7.1x slower)
+- CKKS: 35.23 ms (14.3x slower)
+
+**Addition (ct + ct):**
+- PVAC-HFHE: 0.012 ms
+- BFV: 0.124 ms (10x slower)
+- BGV: 0.552 ms (46x slower)
+- CKKS: 1.050 ms (87x slower)
+
+### Ciphertext size
+
+Fresh ciphertext sizes demonstrate PVAC-HFHE's efficiency:
+
+| Scheme | Mode | Size | vs PVAC |
+|--------|------|------|------|
+| PVAC-HFHE | scalar | 42 KB | 1.0x |
+| BFV | shallow | 256 KB | 6x larger |
+| BFV | leveled | 1024 KB | 24x larger |
+| BGV | leveled | 1792 KB | 43x larger |
+| CKKS | leveled | 3584 KB | 85x larger |
+
+<Info>
+PVAC-HFHE works with arbitrary uint64 values, while BFV requires NTT-friendly primes (p-1 divisible by 2×ring_dim).
+</Info>
+
+## Proof of concept limitations
+
+<Warning>
+These limitations are specific to the current PoC implementation and are primarily due to unoptimized code paths and debugging systems.
+</Warning>
+
+| Metric | Limitation |
+|--------|------------|
+| Deep circuits (d ≥ 3) | 2-30x slower |
+| Ciphertext growth | Exponential with depth |
+| SIMD throughput | 146x slower |
+| Key generation | 22x slower |
+| Encryption | 8x slower |
+
+### Deep circuit performance
+
+At shallow depths (d=1, d=2), PVAC-HFHE maintains its performance advantage. However, the PoC exhibits exponential degradation at deeper circuit depths, while RLWE schemes maintain near-constant performance through modulus switching:
+
+| Depth | PVAC-HFHE | BFV | BGV | CKKS | Fastest |
+|-------|-----------|-----|-----|------|----------|
+| d1 | 2.68 ms | 19.54 ms | 17.40 ms | 35.85 ms | PVAC 7.3x |
+| d2 | 10.34 ms | 14.38 ms | 15.11 ms | 31.22 ms | PVAC 1.4x |
+| d3 | 31.46 ms | 13.98 ms | 14.39 ms | 30.71 ms | BFV 2.3x |
+| d4 | 97.11 ms | 13.84 ms | 11.10 ms | 21.83 ms | BGV 8.7x |
+| d5 | 285.83 ms | 11.37 ms | 9.50 ms | 18.93 ms | BGV 30x |
+
+### Ciphertext growth with depth
+
+| Depth | Time | Size | Growth |
+|-------|------|------|--------|
+| d0 | - | 42 KB | 1.0x |
+| d1 | 2.68 ms | 34 KB | 0.8x |
+| d2 | 10.34 ms | 136 KB | 3.2x |
+| d3 | 31.46 ms | 441 KB | 10.5x |
+| d4 | 97.11 ms | 1359 KB | 32x |
+| d5 | 285.83 ms | 4112 KB | 98x |
+
+PVAC-HFHE ciphertext size exceeds BFV leveled at depth 4.
+
+## Comparison with bit-level FHE
+
+For 64-bit integer operations, PVAC-HFHE demonstrates dramatic speedups compared to bit-level schemes:
+
+### TFHE-rs comparison
+
+| Operation | PVAC-HFHE (PoC) | TFHE-rs CPU | TFHE-rs GPU | vs CPU | vs GPU |
+|-----------|-----------------|-------------|-------------|--------|--------|
+| Addition | 0.012 ms | 109 ms | 8.97 ms | 9083x | 747x |
+| Subtraction | 0.012 ms | 109 ms | 8.97 ms | 9083x | 747x |
+| Multiplication | 2.47 ms | 402 ms | 31.9 ms | 163x | 13x |
+
+<Tip>
+While the comparison with bit-level FHE demonstrates significant performance differences, it's important to note that these schemes solve different problems. Bit-level schemes excel at arbitrary boolean circuits, while PVAC-HFHE is optimized for scalar arithmetic.
+</Tip>
+
+## Use case recommendations
+
+Based on these benchmarks, PVAC-HFHE (even as a PoC) is well-suited for:
+
+- Shallow computation circuits (depth 1-2)
+- Scalar arithmetic operations on 64-bit integers
+- Applications requiring small ciphertext sizes
+- Dot products and vector operations
+- Polynomial evaluation (degree ≤ 3)
+
+For deep circuits (depth ≥ 3) or SIMD batch processing, production RLWE schemes currently offer better performance.
+
+## Next steps
+
+- Review the [detailed comparisons](/benchmarks/comparison) for specific operation benchmarks
+- Understand the [testing methodology](/benchmarks/methodology) and how to reproduce results
+- Explore the [API reference](/api-reference) to start implementing with PVAC-HFHE

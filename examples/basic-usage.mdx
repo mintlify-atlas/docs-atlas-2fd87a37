@@ -1,0 +1,297 @@
+---
+title: Basic usage
+description: Complete walkthrough of PVAC-HFHE basic operations and functionality
+---
+
+This example demonstrates the core functionality of PVAC-HFHE, including key generation, encryption/decryption, homomorphic operations, and various algebraic properties.
+
+## Overview
+
+The basic usage example showcases:
+
+- Key generation and parameter setup
+- Encryption and decryption of values
+- Homomorphic addition, multiplication, and subtraction
+- Algebraic properties (commutativity, associativity, distributivity)
+- Advanced operations (powers, polynomials, Fibonacci, factorial)
+- Text encryption and performance benchmarks
+
+## Key generation
+
+<Steps>
+  <Step title="Initialize parameters and keys">
+    Start by setting up the cryptographic parameters and generating the public/secret key pair:
+
+    ```cpp
+    #include <pvac/pvac.hpp>
+    using namespace pvac;
+
+    Params prm;
+    PubKey pk;
+    SecKey sk;
+    keygen(prm, pk, sk);
+    ```
+
+    This creates default parameters with:
+    - `m_bits`: Field size parameter
+    - `n_bits`: Security parameter
+    - `B`: Budget parameter
+  </Step>
+</Steps>
+
+## Basic encryption and decryption
+
+Encrypt and decrypt integer values:
+
+```cpp
+uint64_t a = 42, b = 17;
+Cipher ca = enc_value(pk, sk, a);
+Cipher cb = enc_value(pk, sk, b);
+
+// Decrypt and verify
+assert(dec_value(pk, sk, ca).lo == 42);
+assert(dec_value(pk, sk, cb).lo == 17);
+```
+
+<Note>
+The `.lo` field extracts the lower 64 bits of the field element, which contains the encrypted integer value.
+</Note>
+
+## Homomorphic operations
+
+### Addition and subtraction
+
+```cpp
+// Encrypt values
+Cipher ca = enc_value(pk, sk, 42);
+Cipher cb = enc_value(pk, sk, 17);
+
+// Homomorphic addition
+Cipher sum = ct_add(pk, ca, cb);
+assert(dec_value(pk, sk, sum).lo == 59);  // 42 + 17
+
+// Homomorphic subtraction
+Cipher diff = ct_sub(pk, ca, cb);
+assert(dec_value(pk, sk, diff).lo == 25);  // 42 - 17
+```
+
+### Multiplication
+
+```cpp
+// Homomorphic multiplication
+Cipher prod = ct_mul(pk, ca, cb);
+assert(dec_value(pk, sk, prod).lo == 714);  // 42 * 17
+```
+
+## Algebraic properties
+
+PVAC-HFHE preserves standard algebraic properties:
+
+### Commutativity
+
+```cpp
+// Addition: a + b = b + a
+Cipher c_ab = ct_add(pk, ca, cb);
+Cipher c_ba = ct_add(pk, cb, ca);
+assert(dec_value(pk, sk, c_ab).lo == dec_value(pk, sk, c_ba).lo);
+
+// Multiplication: a * b = b * a
+assert(dec_value(pk, sk, ct_mul(pk, ca, cb)).lo == 
+       dec_value(pk, sk, ct_mul(pk, cb, ca)).lo);
+```
+
+### Associativity
+
+```cpp
+uint64_t c = 7;
+Cipher cc = enc_value(pk, sk, c);
+
+// (a + b) + c = a + (b + c)
+Cipher c_ab_c = ct_add(pk, ct_add(pk, ca, cb), cc);
+Cipher c_a_bc = ct_add(pk, ca, ct_add(pk, cb, cc));
+assert(dec_value(pk, sk, c_ab_c).lo == dec_value(pk, sk, c_a_bc).lo);
+
+// (a * b) * c = a * (b * c)
+Cipher c_ab_c_mul = ct_mul(pk, ct_mul(pk, ca, cb), cc);
+Cipher c_a_bc_mul = ct_mul(pk, ca, ct_mul(pk, cb, cc));
+assert(dec_value(pk, sk, c_ab_c_mul).lo == dec_value(pk, sk, c_a_bc_mul).lo);
+```
+
+### Distributivity
+
+```cpp
+// a * (b + c) = a*b + a*c
+Cipher c_bpc = ct_add(pk, cb, cc);
+Cipher c_a_bpc = ct_mul(pk, ca, c_bpc);
+Cipher c_ab_ac = ct_add(pk, ct_mul(pk, ca, cb), ct_mul(pk, ca, cc));
+assert(dec_value(pk, sk, c_a_bpc).lo == dec_value(pk, sk, c_ab_ac).lo);
+```
+
+## Advanced examples
+
+### Computing powers
+
+Compute x^8 through repeated squaring:
+
+```cpp
+Cipher cx_1 = enc_value(pk, sk, 2);
+Cipher cx_2 = ct_mul(pk, cx_1, cx_1);  // 2^2 = 4
+Cipher cx_4 = ct_mul(pk, cx_2, cx_2);  // 4^2 = 16
+Cipher cx_8 = ct_mul(pk, cx_4, cx_4);  // 16^2 = 256
+
+assert(dec_value(pk, sk, cx_8).lo == 256);
+```
+
+<Tip>
+The circuit depth for x^8 is only 3 multiplications when using repeated squaring, making it very efficient.
+</Tip>
+
+### Fibonacci sequence
+
+Compute the 10th Fibonacci number:
+
+```cpp
+Cipher fib_p = enc_value(pk, sk, 0);
+Cipher fib_c = enc_value(pk, sk, 1);
+
+for (int i = 2; i <= 10; i++) {
+    Cipher fib_n = ct_add(pk, fib_p, fib_c);
+    fib_p = fib_c;
+    fib_c = fib_n;
+}
+
+assert(dec_value(pk, sk, fib_c).lo == 55);  // fib(10) = 55
+```
+
+### Factorial
+
+Compute 6! homomorphically:
+
+```cpp
+Cipher fact = enc_value(pk, sk, 1);
+for (uint64_t i = 2; i <= 6; i++) {
+    fact = ct_mul(pk, fact, enc_value(pk, sk, i));
+}
+
+assert(dec_value(pk, sk, fact).lo == 720);  // 6! = 720
+```
+
+### Sum of squares
+
+Compute 1² + 2² + 3² + 4² + 5²:
+
+```cpp
+Cipher sum_sq = enc_value(pk, sk, 0);
+for (uint64_t i = 1; i <= 5; i++) {
+    Cipher ci = enc_value(pk, sk, i);
+    sum_sq = ct_add(pk, sum_sq, ct_mul(pk, ci, ci));
+}
+
+assert(dec_value(pk, sk, sum_sq).lo == 55);  // 1 + 4 + 9 + 16 + 25 = 55
+```
+
+## Text encryption
+
+PVAC-HFHE supports encrypting text strings:
+
+```cpp
+// ASCII text
+std::string ascii = "Hello, World!";
+std::vector<Cipher> enc_ascii = enc_text(pk, sk, ascii);
+std::string dec_ascii = dec_text(pk, sk, enc_ascii);
+assert(dec_ascii == ascii);
+
+// Special characters
+std::string special = "!@#$%^&*()_+-=[]{}|;':",./<>?`~";
+assert(dec_text(pk, sk, enc_text(pk, sk, special)) == special);
+
+// Empty string
+std::string empty = "";
+assert(dec_text(pk, sk, enc_text(pk, sk, empty)) == empty);
+```
+
+## Ciphertext properties
+
+### Randomized encryption
+
+The same plaintext encrypted twice produces different ciphertexts:
+
+```cpp
+Cipher ca1 = enc_value(pk, sk, 100);
+Cipher ca2 = enc_value(pk, sk, 100);
+
+// Both decrypt to 100
+assert(dec_value(pk, sk, ca1).lo == 100);
+assert(dec_value(pk, sk, ca2).lo == 100);
+
+// But have different randomness
+assert(ca1.E[0].w[0].lo != ca2.E[0].w[0].lo);
+```
+
+### Commitments
+
+Generate cryptographic commitments to ciphertexts:
+
+```cpp
+auto cm1 = commit_ct(pk, ca1);
+auto cm2 = commit_ct(pk, ca2);
+
+// Different ciphertexts produce different commitments
+assert(cm1 != cm2);
+```
+
+<Note>
+Commitments bind to specific ciphertexts and can be used for verifiable computation protocols.
+</Note>
+
+## Complete example
+
+Here's a complete working example:
+
+```cpp
+#include <iostream>
+#include <pvac/pvac.hpp>
+
+using namespace pvac;
+
+int main() {
+    // Key generation
+    Params prm;
+    PubKey pk;
+    SecKey sk;
+    keygen(prm, pk, sk);
+    
+    // Encrypt values
+    uint64_t a = 42, b = 17;
+    Cipher ca = enc_value(pk, sk, a);
+    Cipher cb = enc_value(pk, sk, b);
+    
+    // Homomorphic operations
+    Cipher sum = ct_add(pk, ca, cb);
+    Cipher prod = ct_mul(pk, ca, cb);
+    Cipher diff = ct_sub(pk, ca, cb);
+    
+    // Decrypt results
+    std::cout << "a + b = " << dec_value(pk, sk, sum).lo << std::endl;   // 59
+    std::cout << "a * b = " << dec_value(pk, sk, prod).lo << std::endl;  // 714
+    std::cout << "a - b = " << dec_value(pk, sk, diff).lo << std::endl;  // 25
+    
+    return 0;
+}
+```
+
+## Source code
+
+The complete basic usage example with all test cases is available at:
+- `examples/basic_usage.cpp`
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Polynomial evaluation" icon="function" href="/examples/polynomial-evaluation">
+    Learn how to evaluate polynomials homomorphically
+  </Card>
+  <Card title="ML credit scoring" icon="brain" href="/examples/ml-credit-scoring">
+    Build encrypted machine learning models
+  </Card>
+</CardGroup>

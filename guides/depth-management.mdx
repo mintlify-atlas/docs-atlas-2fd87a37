@@ -1,0 +1,326 @@
+---
+title: Depth management
+description: Understand circuit depth, noise budget, and ciphertext growth in PVAC-HFHE
+---
+
+Circuit depth is critical to performance and correctness in PVAC-HFHE. This guide explains how depth affects ciphertexts and how to manage it.
+
+## What is circuit depth?
+
+Circuit depth is the longest path of multiplications from inputs to output:
+
+```
+Depth 0: Fresh encryptions, additions only
+Depth 1: One multiplication  (e.g., a * b)
+Depth 2: Two multiplications (e.g., (a * b) * c)
+Depth 3: Three multiplications (e.g., ((a * b) * c) * d)
+```
+
+<Note>
+  Additions and subtractions do not increase depth. Only multiplications increase depth by 1.
+</Note>
+
+## Depth vs performance
+
+From benchmark data (`benchmarks/README.md:88-98`):
+
+| Depth | Time (ms) | CT size | Growth |
+|-------|-----------|---------|--------|
+| d0 | - | 42 KB | 1.0x |
+| d1 | 2.68 | 34 KB | 0.8x |
+| d2 | 10.34 | 136 KB | 3.2x |
+| d3 | 31.46 | 441 KB | 10.5x |
+| d4 | 97.11 | 1359 KB | 32x |
+| d5 | 285.83 | 4112 KB | 98x |
+
+<Warning>
+  Ciphertext size and computation time grow exponentially with depth. At d4, PVAC-HFHE ciphertexts exceed BFV in size.
+</Warning>
+
+## Depth examples
+
+### Depth 1: Single multiplication
+
+```cpp
+Cipher ca = enc_value(pk, sk, 7);
+Cipher cb = enc_value(pk, sk, 6);
+Cipher product = ct_mul(pk, ca, cb);  // Depth 1
+```
+
+From `examples/basic_usage.cpp:150-158`:
+
+```cpp
+Cipher cx_1 = enc_value(pk, sk, 2);
+Cipher cx_2 = ct_mul(pk, cx_1, cx_1);  // 2^2 = 4, depth 1
+Cipher cx_4 = ct_mul(pk, cx_2, cx_2);  // 2^4 = 16, depth 2
+Cipher cx_8 = ct_mul(pk, cx_4, cx_4);  // 2^8 = 256, depth 3
+
+assert(dec_value(pk, sk, cx_8).lo == 256);
+std::cout << "edges: x^1 = " << cx_1.E.size() 
+          << ", x^2 = " << cx_2.E.size()
+          << ", x^4 = " << cx_4.E.size() 
+          << ", x^8 = " << cx_8.E.size() << "\n";
+```
+
+### Depth 3: Polynomial evaluation
+
+Evaluating f(x) = x³ + 2x² + 3x + 4 requires depth 3:
+
+```
+x^2 = x * x           (depth 1)
+x^3 = x^2 * x         (depth 2)
+term1 = x^3           (depth 2)
+term2 = 2 * x^2       (depth 1, constant mul)
+term3 = 3 * x         (depth 0, constant mul)
+term4 = 4             (depth 0)
+result = sum of terms (depth 2, additions don't increase depth)
+```
+
+Actual depth is 2 due to parallel evaluation.
+
+### Depth 4: x^16
+
+From `examples/basic_usage.cpp:159-162`:
+
+```cpp
+Cipher cx_16 = ct_mul(pk, cx_8, cx_8);  // 2^16 = 65536, depth 4
+assert(dec_value(pk, sk, cx_16).lo == 65536);
+std::cout << "edges = " << cx_16.E.size() 
+          << ", layers = " << cx_16.L.size() << "\n";
+```
+
+## Ciphertext growth
+
+Ciphertexts grow because multiplication creates product layers:
+
+### Edge count growth
+
+For multiplication `C = ct_mul(A, B)` with S=8 edges per layer:
+
+```
+|E_C| = |E_A| + |E_B| + (|L_A| × |L_B| × S)
+```
+
+Example:
+- Fresh encryption: ~300 edges, 1 layer
+- After 1 mul: ~900 edges, 2 layers
+- After 2 muls: ~2700 edges, 4 layers
+- After 3 muls: ~8100 edges, 8 layers
+
+<Note>
+  The edge budget parameter (default 1,200,000) triggers automatic compaction when exceeded.
+</Note>
+
+### Layer count growth
+
+```
+|L_C| = |L_A| + |L_B| + (|L_A| × |L_B|)
+```
+
+Layers grow quadratically with each multiplication.
+
+## Noise budget
+
+PVAC-HFHE uses an entropy-based noise budget. From `include/pvac/ops/encrypt.hpp:200-213`:
+
+```cpp
+struct Budget {
+    int n2;  // Number of 2-tuples
+    int n3;  // Number of 3-tuples
+    
+    static Budget compute(const Params& p, int d) {
+        double cap = p.noise_entropy_bits + p.depth_slope_bits * std::max(0, d);
+        double c2 = 2.0 * std::log2(static_cast<double>(p.B));
+        double c3 = 3.0 * std::log2(static_cast<double>(p.B));
+        
+        int q2 = std::max(0, static_cast<int>(std::floor(cap * p.tuple2_fraction / std::max(1e-6, c2))));
+        int q3 = std::max(0, static_cast<int>(std::floor(cap * (1.0 - p.tuple2_fraction) / std::max(1e-6, c3))));
+        
+        return { q2, q3 };
+    }
+};
+```
+
+### Default parameters
+
+- `noise_entropy_bits` = 120.0
+- `tuple2_fraction` = 0.55
+- `depth_slope_bits` = 16.0
+
+Budget at depth d:
+
+```
+cap = 120 + 16 * d
+```
+
+| Depth | Entropy budget | n2 | n3 |
+|-------|----------------|----|----|  
+| 0 | 120 bits | ~10 | ~7 |
+| 1 | 136 bits | ~11 | ~8 |
+| 2 | 152 bits | ~12 | ~9 |
+| 3 | 168 bits | ~13 | ~10 |
+
+<Tip>
+  Higher depth allocates more noise terms, increasing encryption time but enabling deeper computations.
+</Tip>
+
+## Depth hints
+
+Use `enc_value_depth` to preallocate noise budget:
+
+```cpp
+// Encrypt with depth hint 3
+Cipher ct = enc_value_depth(pk, sk, 42, 3);
+```
+
+From `include/pvac/ops/encrypt.hpp:732-738`:
+
+```cpp
+inline Cipher enc_value_depth(const PubKey& pk, const SecKey& sk, uint64_t v, int d) {
+    std::vector<Fp> vals = {fp_from_u64(v)};
+    std::vector<Fp> m = {field::Op::rnd()};
+    return combine_ciphers(pk,
+        enc_fp_depth(pk, sk, field::Op::add(vals, m), d),
+        enc_fp_depth(pk, sk, field::Op::neg(m), d));
+}
+```
+
+### When to use depth hints
+
+| Hint | Use case | Example |
+|------|----------|----------|
+| 0 | Additions only | Summations, linear functions |
+| 1-2 | Shallow circuits | Simple polynomials, dot products |
+| 3-4 | Medium depth | Quadratic forms, decision trees |
+| 5+ | Deep circuits | Neural networks, recursive algorithms |
+
+<Warning>
+  Over-estimating depth wastes computation time and increases ciphertext size. Under-estimating may cause decryption failures.
+</Warning>
+
+## Compaction strategies
+
+PVAC-HFHE automatically compacts ciphertexts when edge budget is exceeded:
+
+### Edge compaction
+
+From `include/pvac/ops/encrypt.hpp:658-660`:
+
+```cpp
+inline void compact_edges(const PubKey& pk, Cipher& C) {
+    C.E = reduction::merge(alg::Carrier<Edge>{ std::move(C.E) }, pk).unwrap();
+}
+```
+
+Merges edges with the same `(layer_id, idx, ch)` triple.
+
+### Layer compaction
+
+From `include/pvac/ops/encrypt.hpp:662-707`:
+
+Removes unused layers and renumbers layer IDs.
+
+### Budget guard
+
+From `include/pvac/ops/encrypt.hpp:709-714`:
+
+```cpp
+inline void guard_budget(const PubKey& pk, Cipher& C, const char* ctx) {
+    if (C.E.size() > pk.prm.edge_budget) {
+        if (g_dbg) std::cout << "[guard] " << ctx << ": " << C.E.size() << " -> compact\n";
+        compact_edges(pk, C);
+    }
+}
+```
+
+Automatically triggered after every arithmetic operation.
+
+## Benchmarking depth
+
+From `examples/basic_usage.cpp:246-265`:
+
+```cpp
+// 100 additions (depth 0)
+auto t1 = std::chrono::high_resolution_clock::now();
+Cipher perf_sum = enc_value(pk, sk, 0);
+for (int i = 0; i < 100; i++) 
+    perf_sum = ct_add(pk, perf_sum, enc_value(pk, sk, i));
+auto t2 = std::chrono::high_resolution_clock::now();
+auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
+assert(dec_value(pk, sk, perf_sum).lo == 4950);
+std::cout << "time = " << ms << " ms, edges = " << perf_sum.E.size() << "\n";
+
+// 10 multiplications (depth 10)
+t1 = std::chrono::high_resolution_clock::now();
+Cipher perf_prod = enc_value(pk, sk, 1);
+for (int i = 0; i < 10; i++) 
+    perf_prod = ct_mul(pk, perf_prod, enc_value(pk, sk, 2));
+t2 = std::chrono::high_resolution_clock::now();
+ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
+assert(dec_value(pk, sk, perf_prod).lo == 1024);
+std::cout << "time = " << ms << " ms, edges = " << perf_prod.E.size() 
+          << ", layers = " << perf_prod.L.size() << "\n";
+```
+
+## Comparison with RLWE schemes
+
+From benchmark data:
+
+| Depth | PVAC-HFHE | BFV | BGV | CKKS | Fastest |
+|-------|-----------|-----|-----|------|----------|
+| d1 | 2.68ms | 19.54ms | 17.40ms | 35.85ms | PVAC 7.3x |
+| d2 | 10.34ms | 14.38ms | 15.11ms | 31.22ms | PVAC 1.4x |
+| d3 | 31.46ms | 13.98ms | 14.39ms | 30.71ms | BFV 2.3x |
+| d4 | 97.11ms | 13.84ms | 11.10ms | 21.83ms | BGV 8.7x |
+| d5 | 285.83ms | 11.37ms | 9.50ms | 18.93ms | BGV 30x |
+
+<Note>
+  PVAC-HFHE has exponential degradation at deep depths, while RLWE schemes maintain near-constant time via modulus switching. PVAC excels at shallow circuits (d ≤ 2).
+</Note>
+
+## Optimization tips
+
+### Minimize depth
+
+```cpp
+// Bad: depth 3
+Cipher bad = ct_mul(pk, ct_mul(pk, ct_mul(pk, a, b), c), d);
+
+// Better: depth 2 via parallelization
+Cipher ab = ct_mul(pk, a, b);
+Cipher cd = ct_mul(pk, c, d);
+Cipher good = ct_mul(pk, ab, cd);
+```
+
+### Use additions freely
+
+```cpp
+// Additions don't increase depth or cost
+Cipher sum = a;
+for (int i = 0; i < 1000; i++) {
+    sum = ct_add(pk, sum, b);  // Still depth 0
+}
+```
+
+### Batch multiplications
+
+```cpp
+// Compute a·b + c·d + e·f at depth 1
+Cipher result = ct_add(pk,
+    ct_add(pk, ct_mul(pk, a, b), ct_mul(pk, c, d)),
+    ct_mul(pk, e, f)
+);
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Performance tuning" icon="gauge" href="/guides/performance-tuning">
+    Advanced optimization techniques
+  </Card>
+  <Card title="Arithmetic operations" icon="calculator" href="/guides/arithmetic-operations">
+    Master ct_mul and ct_square
+  </Card>
+</CardGroup>

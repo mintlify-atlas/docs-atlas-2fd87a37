@@ -1,0 +1,276 @@
+---
+title: Key generation
+description: Understand the parameters, public keys, and secret keys in PVAC-HFHE
+---
+
+Key generation is the foundation of PVAC-HFHE. This guide explains the cryptographic parameters, key structures, and security considerations.
+
+## Quick start
+
+```cpp
+#include <pvac/pvac.hpp>
+using namespace pvac;
+
+Params prm;
+PubKey pk;
+SecKey sk;
+keygen(prm, pk, sk);
+```
+
+## Parameters structure
+
+The `Params` struct controls security and performance trade-offs. From `include/pvac/core/types.hpp:36-70`:
+
+```cpp
+struct Params {
+    // Multiplicative group carrier
+    int B = 337;
+    
+    // Matrix dimensions
+    int m_bits = 8192;
+    int n_bits = 16384;
+    int h_col_wt = 192;
+    int x_col_wt = 128;
+    int err_wt = 128;
+
+    // Noise budget
+    double noise_entropy_bits = 120.0;
+    double tuple2_fraction = 0.55;
+    double depth_slope_bits = 16.0;
+    size_t edge_budget = 1200000;
+
+    // LPN security parameters
+    int lpn_n = 4096;
+    int lpn_t = 16384;
+    int lpn_tau_num = 1;
+    int lpn_tau_den = 8;
+
+    // Recryption settings
+    double recrypt_lo = 0.48;
+    double recrypt_hi = 0.52;
+    int recrypt_rounds = 8;
+};
+```
+
+<Note>
+  Default parameters provide 128-bit security (estimated). Security is based on the Learning Parity with Noise (LPN) assumption.
+</Note>
+
+### Key parameter meanings
+
+| Parameter | Value | Purpose |
+|-----------|-------|----------|
+| `B` | 337 | Multiplicative group order (prime) |
+| `m_bits` | 8192 | LPN matrix rows |
+| `n_bits` | 16384 | LPN matrix columns |
+| `lpn_n` | 4096 | LPN secret dimension |
+| `lpn_t` | 16384 | LPN sample count |
+| `edge_budget` | 1,200,000 | Maximum edges before compaction |
+
+<Warning>
+  Do not modify default parameters without understanding the security implications. The current settings are tuned for 128-bit security.
+</Warning>
+
+## Public key structure
+
+From `include/pvac/core/types.hpp:123-131`:
+
+```cpp
+struct PubKey {
+    Params prm;
+    uint64_t canon_tag;
+    std::vector<BitVec> H;
+    Ubk ubk;
+    std::array<uint8_t, 32> H_digest;
+    Fp omega_B;
+    std::vector<Fp> powg_B;
+};
+```
+
+### Key components
+
+**`Params prm`**  
+Copy of the parameter set used for key generation.
+
+**`uint64_t canon_tag`**  
+Random tag for domain separation in PRFs.
+
+**`std::vector<BitVec> H`**  
+LPN matrix H used in encryption.
+
+**`Fp omega_B`**  
+Primitive B-th root of unity in the field.
+
+**`std::vector<Fp> powg_B`**  
+Precomputed powers g^0, g^1, ..., g^(B-1) where g generates the multiplicative subgroup of order B.
+
+**`std::array<uint8_t, 32> H_digest`**  
+SHA-256 hash of the matrix H for verification.
+
+## Secret key structure
+
+From `include/pvac/core/types.hpp:133-136`:
+
+```cpp
+struct SecKey {
+    std::array<uint64_t, 4> prf_k;
+    std::vector<uint64_t> lpn_s_bits;
+};
+```
+
+### Key components
+
+**`std::array<uint64_t, 4> prf_k`**  
+256-bit PRF key (4 × 64-bit words) for generating randomness.
+
+**`std::vector<uint64_t> lpn_s_bits`**  
+LPN secret vector s packed as 64-bit words. Size is `(lpn_n + 63) / 64` words.
+
+<Warning>
+  The secret key must be kept confidential. Anyone with access to `sk` can decrypt all ciphertexts encrypted under the corresponding `pk`.
+</Warning>
+
+## Key generation algorithm
+
+From `include/pvac/crypto/keygen.hpp:35-136`, the `keygen` function:
+
+<Steps>
+  <Step title="Initialize parameters">
+    Copy parameters to public key and verify constraints (e.g., B divides p-1)
+  </Step>
+  <Step title="Generate PRF key">
+    Sample 4 random 64-bit values for `sk.prf_k`
+  </Step>
+  <Step title="Find generator g">
+    Find a generator of the multiplicative subgroup of order B using exponentiation by (p-1)/B
+  </Step>
+  <Step title="Precompute powers">
+    Compute `powg_B[i] = g^i` for i = 0 to B-1
+  </Step>
+  <Step title="Find root of unity">
+    Find primitive B-th root of unity ω_B by testing candidates
+  </Step>
+  <Step title="Generate LPN secret">
+    Sample random bits for `lpn_s_bits` with proper masking
+  </Step>
+  <Step title="Generate matrix H">
+    Create the LPN matrix H (implicit in `gen_H`)
+  </Step>
+</Steps>
+
+### Generator finding (excerpt)
+
+From `include/pvac/crypto/keygen.hpp:67-88`:
+
+```cpp
+Fp g;
+for (;;) {
+    Fp h = rand_fp();
+    Fp base = h;
+    Fp acc = fp_from_u64(1);
+    u128 e = E;  // E = (p-1)/B
+    
+    while (e) {
+        if (e & 1) {
+            acc = fp_mul(acc, base);
+        }
+        base = fp_mul(base, base);
+        e >>= 1;
+    }
+    
+    if (!ct::fp_is_one(acc)) {
+        g = acc;
+        break;
+    }
+}
+```
+
+### LPN secret generation (excerpt)
+
+From `include/pvac/crypto/keygen.hpp:124-135`:
+
+```cpp
+size_t s_words = (pk.prm.lpn_n + 63) / 64;
+sk.lpn_s_bits.resize(s_words);
+
+for (size_t i = 0; i < s_words; i++) {
+    sk.lpn_s_bits[i] = csprng_u64();
+}
+
+if (pk.prm.lpn_n & 63) {
+    uint64_t m = (pk.prm.lpn_n & 63);
+    uint64_t mask = (m == 64) ? ~0ull : ((1ull << m) - 1ull);
+    sk.lpn_s_bits.back() &= mask;
+}
+```
+
+## Inspecting generated keys
+
+From `examples/basic_usage.cpp:51-56`:
+
+```cpp
+keygen(prm, pk, sk);
+std::cout << "H = 0x" << hex8(pk.H_digest.data(), 8) << "\n";
+std::cout << "m = " << prm.m_bits << ", n = " << prm.n_bits 
+          << ", B = " << prm.B << "\n";
+print_seckey(sk);
+```
+
+## Key sizes
+
+Based on benchmark data:
+
+| Key | Size | Notes |
+|-----|------|-------|
+| Public key | 8 MB | Includes H matrix and precomputed powers |
+| Secret key | ~512 bytes | PRF key (32B) + LPN secret (~512 bits packed) |
+
+<Tip>
+  The public key is relatively large (8 MB) but only needs to be generated once per session. The secret key is compact.
+</Tip>
+
+## Security considerations
+
+### LPN hardness
+
+Security is based on the decisional LPN problem:
+
+```
+Given (H, y = H·s + e) where:
+- H is a random m × n binary matrix
+- s is a random n-bit secret
+- e is a random error vector with Hamming weight τ·m
+
+Distinguish y from random
+```
+
+**Security estimates** (from `include/pvac/core/types.hpp:53-56`):
+- Information-theoretic bound: 2226 bits
+- Classical security: 200+ bits
+- Quantum security: 100+ bits
+
+<Note>
+  These estimates assume τ = 1/8 (12.5% error rate) with the default parameters.
+</Note>
+
+## Performance
+
+From benchmark data (`benchmarks/README.md:198`):
+
+- **Key generation time**: 858.95 ms (mean)
+- **Comparison**: 22x slower than BFV (38ms), but this is a one-time cost
+
+<Warning>
+  Key generation is currently unoptimized in this proof-of-concept implementation. Production versions would be significantly faster.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Encryption and decryption" icon="lock" href="/guides/encryption-decryption">
+    Learn how to use the generated keys
+  </Card>
+  <Card title="Performance tuning" icon="gauge" href="/guides/performance-tuning">
+    Optimize key generation and usage
+  </Card>
+</CardGroup>

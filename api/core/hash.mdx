@@ -1,0 +1,493 @@
+---
+title: Hash functions
+description: Cryptographic hash functions and XOF for PVAC-HFHE
+---
+
+## Overview
+
+This module provides cryptographic hash functions (SHA-256) and extendable-output functions (SHAKE256) for key derivation, commitments, and deterministic randomness expansion in PVAC-HFHE.
+
+## SHA-256
+
+### Sha256
+
+SHA-256 hash state for incremental hashing.
+
+```cpp
+struct Sha256 {
+    uint32_t h[8];
+    uint64_t len;
+    uint8_t buf[64];
+    size_t ptr;
+};
+```
+
+<ParamField path="h" type="uint32_t[8]">
+  Hash state (eight 32-bit words)
+</ParamField>
+
+<ParamField path="len" type="uint64_t">
+  Total number of bytes processed
+</ParamField>
+
+<ParamField path="buf" type="uint8_t[64]">
+  Input buffer for the current block
+</ParamField>
+
+<ParamField path="ptr" type="size_t">
+  Current position in buffer
+</ParamField>
+
+### Methods
+
+#### init
+
+Initializes the hash state.
+
+```cpp
+void init();
+```
+
+**Example:**
+```cpp
+Sha256 hasher;
+hasher.init();
+```
+
+#### update
+
+Processes data incrementally.
+
+```cpp
+void update(const void* data, size_t n);
+```
+
+<ParamField path="data" type="const void*">
+  Pointer to data to hash
+</ParamField>
+
+<ParamField path="n" type="size_t">
+  Number of bytes to process
+</ParamField>
+
+**Example:**
+```cpp
+Sha256 hasher;
+hasher.init();
+hasher.update("hello", 5);
+hasher.update("world", 5);
+```
+
+#### finish
+
+Finalizes the hash and produces the digest.
+
+```cpp
+void finish(uint8_t out[32]);
+```
+
+<ParamField path="out" type="uint8_t[32]">
+  Output buffer for 256-bit (32-byte) digest
+</ParamField>
+
+**Example:**
+```cpp
+Sha256 hasher;
+hasher.init();
+hasher.update(data, len);
+
+uint8_t digest[32];
+hasher.finish(digest);
+```
+
+### Convenience functions
+
+#### sha256_bytes
+
+Computes SHA-256 hash of a single buffer.
+
+```cpp
+void sha256_bytes(const void* data, size_t n, uint8_t out[32]);
+```
+
+<ParamField path="data" type="const void*">
+  Input data
+</ParamField>
+
+<ParamField path="n" type="size_t">
+  Input length in bytes
+</ParamField>
+
+<ParamField path="out" type="uint8_t[32]">
+  Output digest
+</ParamField>
+
+**Example:**
+```cpp
+uint8_t digest[32];
+sha256_bytes("hello world", 11, digest);
+```
+
+#### sha256_acc_u64
+
+Accumulates a 64-bit integer into the hash in little-endian format.
+
+```cpp
+void sha256_acc_u64(Sha256& s, uint64_t x);
+```
+
+<ParamField path="s" type="Sha256&">
+  Hash state
+</ParamField>
+
+<ParamField path="x" type="uint64_t">
+  Value to hash
+</ParamField>
+
+**Example:**
+```cpp
+Sha256 s;
+s.init();
+sha256_acc_u64(s, 0x123456789ABCDEFULL);
+sha256_acc_u64(s, timestamp);
+
+uint8_t digest[32];
+s.finish(digest);
+```
+
+## SHAKE256
+
+### Shake256
+
+SHAKE256 XOF (extendable-output function) state.
+
+```cpp
+struct Shake256 {
+    uint64_t st[25];
+    size_t rate;
+    size_t pos;
+    bool squeezing;
+};
+```
+
+<ParamField path="st" type="uint64_t[25]">
+  Keccak state (1600 bits)
+</ParamField>
+
+<ParamField path="rate" type="size_t">
+  Rate parameter (136 bytes for SHAKE256)
+</ParamField>
+
+<ParamField path="pos" type="size_t">
+  Current position in rate bytes
+</ParamField>
+
+<ParamField path="squeezing" type="bool">
+  True if in squeezing mode, false if absorbing
+</ParamField>
+
+### Methods
+
+#### init
+
+Initializes SHAKE256 state.
+
+```cpp
+void init();
+```
+
+**Example:**
+```cpp
+Shake256 xof;
+xof.init();
+```
+
+#### absorb
+
+Absorbs input data into the sponge.
+
+```cpp
+void absorb(const uint8_t* data, size_t len);
+```
+
+<ParamField path="data" type="const uint8_t*">
+  Input data
+</ParamField>
+
+<ParamField path="len" type="size_t">
+  Input length in bytes
+</ParamField>
+
+**Example:**
+```cpp
+Shake256 xof;
+xof.init();
+xof.absorb((const uint8_t*)"seed", 4);
+xof.absorb((const uint8_t*)&counter, sizeof(counter));
+```
+
+<Warning>
+  Do not call `absorb()` after calling `squeeze()`. The function will abort if called in squeezing mode.
+</Warning>
+
+#### pad
+
+Finalizes absorption and switches to squeezing mode.
+
+```cpp
+void pad();
+```
+
+**Example:**
+```cpp
+xof.absorb(seed, seed_len);
+xof.pad();
+// Now ready to squeeze output
+```
+
+#### squeeze
+
+Extracts output bytes from the XOF.
+
+```cpp
+void squeeze(uint8_t* out, size_t len);
+```
+
+<ParamField path="out" type="uint8_t*">
+  Output buffer
+</ParamField>
+
+<ParamField path="len" type="size_t">
+  Number of bytes to extract
+</ParamField>
+
+**Example:**
+```cpp
+uint8_t output[1024];
+xof.squeeze(output, 1024);
+```
+
+<Note>
+  You can call `squeeze()` multiple times to extract as much output as needed. The function automatically calls `pad()` if not already in squeezing mode.
+</Note>
+
+#### next_u64
+
+Extracts the next 64-bit integer from the XOF.
+
+```cpp
+uint64_t next_u64();
+```
+
+<ResponseField name="return" type="uint64_t">
+  Next 64 bits of output
+</ResponseField>
+
+**Example:**
+```cpp
+uint64_t r1 = xof.next_u64();
+uint64_t r2 = xof.next_u64();
+```
+
+## XofShake
+
+### XofShake
+
+High-level wrapper for SHAKE256 with domain-separated seeding.
+
+```cpp
+struct XofShake {
+    Shake256 sh;
+};
+```
+
+### Methods
+
+#### init
+
+Initializes XOF with a label and seed.
+
+```cpp
+void init(const std::string& label, const std::vector<uint64_t>& seed);
+```
+
+<ParamField path="label" type="const std::string&">
+  Domain separation label (e.g., from `Dom` namespace)
+</ParamField>
+
+<ParamField path="seed" type="const std::vector<uint64_t>&">
+  Seed values in little-endian format
+</ParamField>
+
+**Example:**
+```cpp
+XofShake xof;
+std::vector<uint64_t> seed = {tag, nonce.lo, nonce.hi};
+xof.init(Dom::NOISE, seed);
+```
+
+#### take_u64
+
+Extracts the next 64-bit value.
+
+```cpp
+uint64_t take_u64();
+```
+
+<ResponseField name="return" type="uint64_t">
+  Next 64-bit value
+</ResponseField>
+
+**Example:**
+```cpp
+uint64_t random = xof.take_u64();
+```
+
+#### bounded
+
+Generates a uniformly random integer in the range [0, M).
+
+```cpp
+uint64_t bounded(uint64_t M);
+```
+
+<ParamField path="M" type="uint64_t">
+  Upper bound (exclusive)
+</ParamField>
+
+<ResponseField name="return" type="uint64_t">
+  Uniformly random value in [0, M)
+</ResponseField>
+
+**Example:**
+```cpp
+// Random value in [0, 100)
+uint64_t dice = xof.bounded(100);
+
+// Random index for array of size n
+size_t idx = xof.bounded(n);
+```
+
+<Note>
+  This function uses rejection sampling to ensure uniform distribution, avoiding modulo bias.
+</Note>
+
+## Utility functions
+
+### hex8
+
+Converts binary data to hexadecimal string.
+
+```cpp
+std::string hex8(const uint8_t* d, size_t n);
+```
+
+<ParamField path="d" type="const uint8_t*">
+  Input data
+</ParamField>
+
+<ParamField path="n" type="size_t">
+  Number of bytes
+</ParamField>
+
+<ResponseField name="return" type="std::string">
+  Hexadecimal string (lowercase)
+</ResponseField>
+
+**Example:**
+```cpp
+uint8_t digest[32];
+sha256_bytes(data, len, digest);
+std::string hex = hex8(digest, 32);
+std::cout << "Hash: " << hex << std::endl;
+```
+
+## Usage patterns
+
+### Computing public key digest
+
+```cpp
+Sha256 s;
+s.init();
+for (const auto& h_row : pk.H) {
+    s.update(h_row.w.data(), h_row.w.size() * sizeof(uint64_t));
+}
+s.finish(pk.H_digest.data());
+```
+
+### Deterministic random stream
+
+```cpp
+XofShake xof;
+std::vector<uint64_t> seed = {prf_key[0], prf_key[1], prf_key[2], prf_key[3]};
+xof.init(Dom::PRF_LPN, seed);
+
+// Generate random matrix
+for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j++) {
+        matrix[i][j] = xof.take_u64();
+    }
+}
+```
+
+### Sampling without replacement
+
+```cpp
+XofShake xof;
+xof.init(Dom::X_SEED, seed);
+
+std::set<size_t> selected;
+while (selected.size() < target_count) {
+    size_t idx = xof.bounded(total_count);
+    selected.insert(idx);
+}
+```
+
+### Commitment scheme
+
+```cpp
+// Commit
+uint8_t commitment[32];
+Sha256 s;
+s.init();
+s.update(message, message_len);
+sha256_acc_u64(s, randomness);
+s.finish(commitment);
+
+// Verify
+uint8_t recomputed[32];
+s.init();
+s.update(revealed_message, message_len);
+sha256_acc_u64(s, revealed_randomness);
+s.finish(recomputed);
+
+bool valid = std::memcmp(commitment, recomputed, 32) == 0;
+```
+
+## Security properties
+
+### SHA-256
+
+- **Collision resistance:** ~128-bit security
+- **Preimage resistance:** 256-bit security
+- **Second preimage resistance:** 256-bit security
+
+### SHAKE256
+
+- **Security level:** 256-bit (for 512-bit output)
+- **Collision resistance:** 128-bit
+- **Uniformity:** Output is computationally indistinguishable from random
+
+## Performance
+
+<Note>
+  - SHA-256: ~300-500 MB/s on modern CPUs
+  - SHAKE256: ~150-250 MB/s on modern CPUs
+  - Hardware acceleration (AES-NI, SHA extensions) not currently used
+</Note>
+
+## Related
+
+- [Types](/api/core/types) - Domain separation constants
+- [Random generation](/api/core/random) - Cryptographically secure random bytes
+- [Field operations](/api/core/field) - Used with deterministic randomness

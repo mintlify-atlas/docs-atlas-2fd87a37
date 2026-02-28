@@ -1,0 +1,256 @@
+---
+title: BitVec
+description: Binary vector operations for PVAC-HFHE
+---
+
+## Overview
+
+This module provides the `BitVec` structure for efficient storage and manipulation of binary vectors. BitVec is used extensively in LPN-based encryption and noise generation.
+
+## Structure
+
+### BitVec
+
+Compact representation of a binary vector using packed 64-bit words.
+
+```cpp
+struct BitVec {
+    size_t nbits;
+    std::vector<uint64_t> w;
+};
+```
+
+<ParamField path="nbits" type="size_t">
+  Number of bits in the vector
+</ParamField>
+
+<ParamField path="w" type="std::vector<uint64_t>">
+  Storage array where each uint64_t holds 64 bits
+</ParamField>
+
+<Note>
+  Bits are packed into 64-bit words for efficient storage and operations. A vector of n bits uses ceil(n/64) words.
+</Note>
+
+## Construction
+
+### make
+
+Creates a new BitVec initialized to all zeros.
+
+```cpp
+static BitVec make(size_t n);
+```
+
+<ParamField path="n" type="size_t">
+  Number of bits in the vector
+</ParamField>
+
+<ResponseField name="return" type="BitVec">
+  New BitVec with n bits, all initialized to 0
+</ResponseField>
+
+**Example:**
+```cpp
+// Create a 1024-bit vector
+BitVec vec = BitVec::make(1024);
+
+// Create a vector matching parameter size
+BitVec h_row = BitVec::make(params.n_bits);
+```
+
+## Operations
+
+### xor_with
+
+Performs in-place XOR with another BitVec.
+
+```cpp
+void xor_with(const BitVec& b);
+```
+
+<ParamField path="b" type="const BitVec&">
+  Vector to XOR with
+</ParamField>
+
+**Example:**
+```cpp
+BitVec a = BitVec::make(128);
+BitVec b = BitVec::make(128);
+
+// Set some bits in a and b...
+
+// Compute a ^= b
+a.xor_with(b);
+```
+
+<Note>
+  If the vectors have different sizes, only the overlapping portion (minimum size) is affected.
+</Note>
+
+### popcnt
+
+Counts the number of 1-bits in the vector (Hamming weight).
+
+```cpp
+size_t popcnt() const;
+```
+
+<ResponseField name="return" type="size_t">
+  Number of bits set to 1
+</ResponseField>
+
+**Example:**
+```cpp
+BitVec vec = BitVec::make(1024);
+// ... set some bits ...
+
+size_t weight = vec.popcnt();
+std::cout << "Hamming weight: " << weight << std::endl;
+```
+
+<Note>
+  Uses the compiler's `__builtin_popcountll` intrinsic for efficient population count on 64-bit words.
+</Note>
+
+## Utility functions
+
+### parity64
+
+Computes the parity (XOR of all bits) of a 64-bit word in constant time.
+
+```cpp
+int parity64(uint64_t x);
+```
+
+<ParamField path="x" type="uint64_t">
+  Input word
+</ParamField>
+
+<ResponseField name="return" type="int">
+  0 if an even number of bits are set, 1 if odd
+</ResponseField>
+
+**Example:**
+```cpp
+uint64_t word = 0b1011; // 3 bits set (odd)
+int p = parity64(word); // p = 1
+
+word = 0b1001; // 2 bits set (even)
+p = parity64(word); // p = 0
+```
+
+<Note>
+  This function uses constant-time XOR shifts to compute parity, making it suitable for cryptographic applications where timing side-channels must be avoided.
+</Note>
+
+## Implementation details
+
+### Bit packing
+
+Bits are stored in little-endian order within each 64-bit word:
+- Bit 0 is the LSB of `w[0]`
+- Bit 63 is the MSB of `w[0]`
+- Bit 64 is the LSB of `w[1]`
+- And so on...
+
+**Example:**
+```cpp
+BitVec vec = BitVec::make(128);
+// vec.w has size 2 (128 bits / 64 bits per word)
+
+// To set bit 65:
+vec.w[1] |= (1ULL << 1);
+
+// To test bit 65:
+bool is_set = (vec.w[1] & (1ULL << 1)) != 0;
+```
+
+### Memory layout
+
+For a BitVec with `nbits` bits:
+- Number of words: `(nbits + 63) / 64`
+- Memory usage: `8 * ((nbits + 63) / 64)` bytes (plus overhead)
+
+**Example:**
+```cpp
+BitVec vec = BitVec::make(1000);
+// Uses ceil(1000/64) = 16 words
+// Memory: 16 * 8 = 128 bytes
+```
+
+## Usage patterns
+
+### LPN secret vector
+
+```cpp
+// Create secret vector
+BitVec s = BitVec::make(params.n_bits);
+
+// Generate random bits with specific Hamming weight
+for (int i = 0; i < params.err_wt; i++) {
+    size_t pos = random_position();
+    s.w[pos / 64] |= (1ULL << (pos % 64));
+}
+
+// Verify weight
+assert(s.popcnt() == params.err_wt);
+```
+
+### Combining vectors
+
+```cpp
+BitVec result = BitVec::make(n);
+
+for (const auto& vec : input_vectors) {
+    result.xor_with(vec);
+}
+
+// result now contains the XOR of all input vectors
+```
+
+### Computing inner product
+
+```cpp
+int inner_product_mod2(const BitVec& a, const BitVec& b) {
+    int result = 0;
+    size_t nwords = std::min(a.w.size(), b.w.size());
+    
+    for (size_t i = 0; i < nwords; i++) {
+        result ^= parity64(a.w[i] & b.w[i]);
+    }
+    
+    return result;
+}
+```
+
+## Performance considerations
+
+<Note>
+  **Optimization tips:**
+  - BitVec operations work on 64-bit words, providing 64x speedup over bit-by-bit operations
+  - XOR operations are memory-bandwidth limited; keep vectors aligned
+  - Population count (`popcnt`) uses hardware instructions on modern CPUs
+  - Parity computation is constant-time for security
+</Note>
+
+## Constant-time operations
+
+The `parity64` function is implemented in constant time to prevent timing side-channels:
+
+```cpp
+x ^= x >> 32;  // 32-bit fold
+x ^= x >> 16;  // 16-bit fold
+x ^= x >> 8;   // 8-bit fold
+x ^= x >> 4;   // 4-bit fold
+x &= 0xF;      // Keep lower 4 bits
+return (0x6996 >> x) & 1;  // Lookup table for 4 bits
+```
+
+This approach ensures the execution time is independent of the input value.
+
+## Related
+
+- [Types](/api/core/types) - BitVec usage in cryptographic structures
+- [Random generation](/api/core/random) - Generating random bit vectors
+- [Constant-time operations](/api/core/field) - Side-channel resistant arithmetic

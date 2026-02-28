@@ -1,0 +1,301 @@
+---
+title: Encryption and decryption
+description: Master enc_value, dec_value, and understand ciphertext structures in PVAC-HFHE
+---
+
+This guide covers how to encrypt and decrypt data in PVAC-HFHE, including advanced features like depth hints and multi-slot encryption.
+
+## Basic encryption
+
+The `enc_value` function encrypts a single 64-bit unsigned integer:
+
+```cpp
+#include <pvac/pvac.hpp>
+using namespace pvac;
+
+// After keygen
+uint64_t plaintext = 42;
+Cipher ciphertext = enc_value(pk, sk, plaintext);
+```
+
+### Function signature
+
+From `include/pvac/ops/encrypt.hpp:740-742`:
+
+```cpp
+inline Cipher enc_value(const PubKey& pk, const SecKey& sk, uint64_t v) {
+    return enc_value_depth(pk, sk, v, 0);
+}
+```
+
+<Note>
+  `enc_value` is a wrapper around `enc_value_depth` with depth hint 0, suitable for fresh encryptions.
+</Note>
+
+## Basic decryption
+
+The `dec_value` function decrypts a ciphertext back to a field element:
+
+```cpp
+Fp result = dec_value(pk, sk, ciphertext);
+uint64_t plaintext = result.lo;
+```
+
+### Function signature
+
+From `include/pvac/ops/decrypt.hpp:77-79`:
+
+```cpp
+inline Fp dec_value(const PubKey& pk, const SecKey& sk, const Cipher& C) {
+    return dec_values(pk, sk, C)[0];
+}
+```
+
+<Warning>
+  Always extract the `.lo` field from the returned `Fp` struct. The `.hi` field contains the upper 63 bits of the 127-bit field element.
+</Warning>
+
+## Encryption with depth hints
+
+For computations at specific circuit depths, use `enc_value_depth` to preallocate noise budget:
+
+```cpp
+// Encrypt with depth hint for deeper circuits
+int depth_hint = 3;
+Cipher ct = enc_value_depth(pk, sk, 42, depth_hint);
+```
+
+From `include/pvac/ops/encrypt.hpp:732-738`:
+
+```cpp
+inline Cipher enc_value_depth(const PubKey& pk, const SecKey& sk, uint64_t v, int d) {
+    std::vector<Fp> vals = {fp_from_u64(v)};
+    std::vector<Fp> m = {field::Op::rnd()};
+    return combine_ciphers(pk,
+        enc_fp_depth(pk, sk, field::Op::add(vals, m), d),
+        enc_fp_depth(pk, sk, field::Op::neg(m), d));
+}
+```
+
+### When to use depth hints
+
+| Depth | Use case |
+|-------|----------|
+| 0 | Fresh encryptions, additions only |
+| 1-2 | Shallow circuits (1-2 multiplications) |
+| 3-5 | Medium depth (polynomial evaluation) |
+| 5+ | Deep circuits (recursive computations) |
+
+<Tip>
+  Higher depth hints allocate more noise budget but increase encryption time and ciphertext size.
+</Tip>
+
+## Ciphertext structure
+
+From `include/pvac/core/types.hpp:116-121`:
+
+```cpp
+struct Cipher {
+    std::vector<Layer> L;      // Computation layers
+    std::vector<Edge> E;       // Graph edges
+    std::vector<Fp> c0;        // Constant term
+    size_t slots = 1;          // Number of slots
+};
+```
+
+### Components explained
+
+**`std::vector<Layer> L`**  
+Represents the computation graph layers. Base layers contain randomness seeds, product layers encode multiplications.
+
+**`std::vector<Edge> E`**  
+Edges in the computation graph. Each edge has:
+- `layer_id`: Which layer it belongs to
+- `idx`: Index in the multiplicative group (0 to B-1)
+- `ch`: Sign channel (SGN_P or SGN_M)
+- `w`: Weight vector (field elements)
+- `s`: LPN noise bits
+
+**`std::vector<Fp> c0`**  
+Constant term added to the encrypted value.
+
+**`size_t slots`**  
+Number of values packed in this ciphertext (default 1).
+
+## Multi-slot encryption
+
+Encrypt vectors of values using `enc_values`:
+
+```cpp
+std::vector<uint64_t> values = {1, 2, 3, 4, 5};
+Cipher ct = enc_values(pk, sk, values);
+
+// Decrypt all slots
+std::vector<Fp> results = dec_values(pk, sk, ct);
+for (const auto& r : results) {
+    std::cout << r.lo << " ";
+}
+```
+
+From `include/pvac/ops/encrypt.hpp:753-756`:
+
+```cpp
+inline Cipher enc_values(const PubKey& pk, const SecKey& sk, const std::vector<uint64_t>& v) {
+    return enc_values_depth(pk, sk, v, 0);
+}
+```
+
+<Note>
+  Multi-slot encryption packs multiple values into a single ciphertext, enabling SIMD-style operations.
+</Note>
+
+## Decryption algorithm
+
+The `dec_values` function implements the full decryption procedure:
+
+<Steps>
+  <Step title="Compute layer randomness">
+    For each layer, compute R using PRF with the layer seed
+  </Step>
+  <Step title="Invert randomness">
+    Compute R^(-1) for each layer to unmask edges
+  </Step>
+  <Step title="Accumulate edges">
+    Sum all edges: acc = Σ sign(e) · w · g^idx · R^(-1)
+  </Step>
+  <Step title="Add constant term">
+    Add c0 to the accumulator
+  </Step>
+</Steps>
+
+From `include/pvac/ops/decrypt.hpp:46-75`:
+
+```cpp
+inline std::vector<Fp> dec_values(const PubKey& pk, const SecKey& sk, const Cipher& C) {
+    size_t L = C.L.size();
+    size_t S = C.slots;
+
+    std::vector<std::vector<Fp>> cache(L);
+    std::vector<uint8_t> st(L, 0);
+    std::vector<std::vector<Fp>> Rinv(L);
+
+    for (size_t lid = 0; lid < L; lid++) {
+        auto R = layer_R_cached(pk, sk, C, (uint32_t)lid, st, cache);
+        Rinv[lid].resize(S);
+        for (size_t j = 0; j < S; ++j)
+            Rinv[lid][j] = fp_inv(R[j]);
+    }
+
+    auto acc = C.c0.empty() ? field::Op::zeros(S) : C.c0;
+
+    for (const auto& e : C.E) {
+        Fp gp = pk.powg_B[e.idx];
+        int s = sgn_val(e.ch);
+
+        for (size_t j = 0; j < S; ++j) {
+            Fp term = fp_mul(fp_mul(e.w[j], gp), Rinv[e.layer_id][j]);
+            acc[j] = s > 0 ? fp_add(acc[j], term) : fp_sub(acc[j], term);
+        }
+    }
+
+    return acc;
+}
+```
+
+## Performance characteristics
+
+From benchmark data:
+
+| Operation | Time | Ciphertext size |
+|-----------|------|------------------|
+| `enc_value` | 84ms | 42 KB (fresh) |
+| `dec_value` | 13ms | - |
+
+### Comparison with other schemes
+
+| Scheme | Encrypt | Decrypt | Fresh CT size |
+|--------|---------|---------|---------------|
+| PVAC-HFHE | 84ms | 13ms | 42 KB |
+| BFV | 11ms | 2.5ms | 256-1024 KB |
+| CKKS | 23ms | 10ms | 3584 KB |
+
+<Tip>
+  PVAC-HFHE ciphertexts are 6-85x smaller than RLWE schemes, making them ideal for bandwidth-constrained applications.
+</Tip>
+
+## Testing correctness
+
+From `examples/basic_usage.cpp:59-63`:
+
+```cpp
+uint64_t a = 42, b = 17;
+Cipher ca = enc_value(pk, sk, a);
+Cipher cb = enc_value(pk, sk, b);
+CHECK(dec_value(pk, sk, ca).lo == a, "dec(42) = 42");
+CHECK(dec_value(pk, sk, cb).lo == b, "dec(17) = 17");
+```
+
+### Edge cases
+
+```cpp
+// Zero
+assert(dec_value(pk, sk, enc_value(pk, sk, 0)).lo == 0);
+
+// One  
+assert(dec_value(pk, sk, enc_value(pk, sk, 1)).lo == 1);
+
+// Maximum uint64
+uint64_t max_val = UINT64_MAX;
+assert(dec_value(pk, sk, enc_value(pk, sk, max_val)).lo == max_val);
+```
+
+## Encryption randomness
+
+Every encryption is randomized. Two encryptions of the same value produce different ciphertexts:
+
+```cpp
+Cipher ct1 = enc_value(pk, sk, 100);
+Cipher ct2 = enc_value(pk, sk, 100);
+
+// Same plaintext
+assert(dec_value(pk, sk, ct1).lo == 100);
+assert(dec_value(pk, sk, ct2).lo == 100);
+
+// Different randomness
+assert(ct1.E[0].w[0].lo != ct2.E[0].w[0].lo);
+```
+
+From `examples/basic_usage.cpp:216-221`:
+
+```cpp
+Cipher ca1 = enc_value(pk, sk, 100);
+Cipher ca2 = enc_value(pk, sk, 100);
+CHECK(dec_value(pk, sk, ca1).lo == dec_value(pk, sk, ca2).lo, "both = 100");
+CHECK(ca1.E[0].w[0].lo != ca2.E[0].w[0].lo, "diff rnd");
+```
+
+<Warning>
+  Never reuse the same ciphertext for multiple operations. Always create fresh encryptions when needed.
+</Warning>
+
+## Advanced: Field element encryption
+
+For direct field element encryption, use `enc_fp_depth`:
+
+```cpp
+Fp plaintext = fp_from_u64(42);
+Cipher ct = enc_fp_depth(pk, sk, plaintext, 0);
+```
+
+This is useful when working directly with field arithmetic.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Arithmetic operations" icon="calculator" href="/guides/arithmetic-operations">
+    Perform ct_add, ct_mul, ct_sub on ciphertexts
+  </Card>
+  <Card title="Text encryption" icon="font" href="/guides/text-encryption">
+    Encrypt and decrypt strings
+  </Card>
+</CardGroup>

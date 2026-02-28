@@ -1,0 +1,304 @@
+---
+title: Matrix operations
+description: Sparse matrix and permutation functions for PVAC-HFHE
+---
+
+The matrix module provides functions for generating and manipulating sparse parity check matrices and permutations used in PVAC-HFHE.
+
+## Matrix generation
+
+### gen_H()
+
+Generates the sparse parity check matrix H for the public key.
+
+```cpp
+void gen_H(PubKey& pk)
+```
+
+<ParamField path="pk" type="PubKey&">
+  Public key containing parameters and `canon_tag`. The matrix H is written to `pk.H` and its digest to `pk.H_digest`.
+</ParamField>
+
+#### Algorithm
+
+For each column `c = 0` to `n_bits - 1`:
+1. Generate deterministic seed from `(m_bits, n_bits, h_col_wt, c, canon_tag)`
+2. Use `prg_choose_k()` to select `h_col_wt` unique row indices in `[0, m_bits)`
+3. Set those positions to 1 in the column bit vector
+
+The resulting matrix H is `n × m` with each column having exactly `h_col_wt` ones.
+
+#### Digest computation
+
+After generation, a SHA-256 digest is computed over:
+- Domain separator `"H|v2"`
+- Matrix dimensions: `m_bits`, `n_bits`, `h_col_wt`
+- All column bit vectors in row-major order
+
+The digest is stored in `pk.H_digest` for verification.
+
+<Note>
+The matrix H is deterministic from `canon_tag`, allowing efficient verification without transmitting the full matrix.
+</Note>
+
+### gen_ubk_public()
+
+Generates the public permutation (UBK) from a canonical tag.
+
+```cpp
+Ubk gen_ubk_public(uint64_t canon_tag, int m_bits)
+```
+
+<ParamField path="canon_tag" type="uint64_t">
+  Random tag identifying the key (from `pk.canon_tag`)
+</ParamField>
+
+<ParamField path="m_bits" type="int">
+  Dimension of the permutation (typically 8192)
+</ParamField>
+
+<ResponseField name="return" type="Ubk">
+  Structure containing both the permutation and its inverse
+</ResponseField>
+
+#### Algorithm
+
+Uses the Fisher-Yates shuffle:
+1. Initialize `perm = [0, 1, 2, ..., m_bits-1]`
+2. Derive pseudorandom stream from `canon_tag` using SHA-256 with domain separator `"UBK"`
+3. For `i = m_bits-1` down to `1`:
+   - Generate uniform random `j` in `[0, i]`
+   - Swap `perm[i]` and `perm[j]`
+4. Compute inverse permutation: `inv[perm[i]] = i`
+
+The resulting `Ubk` structure contains:
+- `perm`: forward permutation
+- `inv`: inverse permutation for decryption
+
+### prg_choose_k()
+
+Selects k unique indices uniformly at random from `[0, N)`.
+
+```cpp
+std::vector<int> prg_choose_k(
+    int k,
+    int N,
+    const char* label,
+    const std::vector<uint64_t>& words
+)
+```
+
+<ParamField path="k" type="int">
+  Number of indices to select
+</ParamField>
+
+<ParamField path="N" type="int">
+  Size of the range `[0, N)`
+</ParamField>
+
+<ParamField path="label" type="const char*">
+  Domain separator string (e.g., `Dom::H_GEN`, `Dom::X_SEED`)
+</ParamField>
+
+<ParamField path="words" type="const std::vector<uint64_t>&">
+  Seed words for deterministic randomness
+</ParamField>
+
+<ResponseField name="return" type="std::vector<int>">
+  Vector of k unique indices in `[0, N)`
+</ResponseField>
+
+#### Sampling algorithm
+
+1. **Hash initialization**: Creates PRG from SHA-256 of `(label, words, counter)`
+2. **Bounded sampling**: Uses rejection sampling to avoid modulo bias
+3. **Uniqueness**: Maintains hash set to ensure no duplicates
+4. **Uniform distribution**: Each valid subset has equal probability
+
+The function guarantees:
+- All indices are unique
+- All indices are in range `[0, N)`
+- Distribution is cryptographically uniform
+
+<Warning>
+This function requires `k ≤ N`. If `k > N`, it will loop indefinitely.
+</Warning>
+
+## Permutation operations
+
+### apply_perm_sigma()
+
+Applies an inverse permutation to a bit vector.
+
+```cpp
+BitVec apply_perm_sigma(const BitVec& v, const std::vector<int>& inv)
+```
+
+<ParamField path="v" type="const BitVec&">
+  Input bit vector
+</ParamField>
+
+<ParamField path="inv" type="const std::vector<int>&">
+  Inverse permutation (from `Ubk::inv`)
+</ParamField>
+
+<ResponseField name="return" type="BitVec">
+  Permuted bit vector where `output[inv[i]] = input[i]`
+</ResponseField>
+
+Iterates through set bits in the input vector and sets the corresponding bit in the output at the permuted position.
+
+### ubk_apply()
+
+Applies the UBK inverse permutation to all edges in a ciphertext.
+
+```cpp
+void ubk_apply(const PubKey& pk, Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey&">
+  Public key containing the UBK permutation
+</ParamField>
+
+<ParamField path="C" type="Cipher&">
+  Ciphertext whose edge syndrome vectors will be permuted
+</ParamField>
+
+This function modifies the ciphertext in-place, applying `pk.ubk.inv` to the `s` vector of each edge.
+
+## Syndrome generation
+
+### sigma_from_H()
+
+Generates a syndrome vector for an encryption edge.
+
+```cpp
+BitVec sigma_from_H(
+    const PubKey& pk,
+    uint64_t ztag,
+    Nonce128 nonce,
+    uint16_t idx,
+    uint8_t ch,
+    uint64_t salt
+)
+```
+
+<ParamField path="pk" type="const PubKey&">
+  Public key containing matrix H and parameters
+</ParamField>
+
+<ParamField path="ztag" type="uint64_t">
+  Layer tag (from `RSeed::ztag`)
+</ParamField>
+
+<ParamField path="nonce" type="Nonce128">
+  128-bit nonce (from `RSeed::nonce`)
+</ParamField>
+
+<ParamField path="idx" type="uint16_t">
+  Edge index
+</ParamField>
+
+<ParamField path="ch" type="uint8_t">
+  Channel/sign (0 for positive, 1 for negative)
+</ParamField>
+
+<ParamField path="salt" type="uint64_t">
+  Additional entropy (typically 0)
+</ParamField>
+
+<ResponseField name="return" type="BitVec">
+  Syndrome vector of length `m_bits`
+</ResponseField>
+
+#### Algorithm
+
+1. **Select columns**: Use `prg_choose_k()` to select `x_col_wt` columns from H
+2. **XOR columns**: Compute `s = H[c1] ⊕ H[c2] ⊕ ... ⊕ H[c_{x_col_wt}]`
+3. **Add noise**: Use `prg_choose_k()` to flip `err_wt` random bits in s
+
+The seed for randomness includes all function parameters, ensuring each edge gets a unique syndrome.
+
+### prg_layer_ztag()
+
+Computes the layer ztag from `canon_tag` and nonce.
+
+```cpp
+uint64_t prg_layer_ztag(uint64_t canon_tag, Nonce128 n)
+```
+
+<ParamField path="canon_tag" type="uint64_t">
+  Public key canonical tag
+</ParamField>
+
+<ParamField path="n" type="Nonce128">
+  128-bit layer nonce
+</ParamField>
+
+<ResponseField name="return" type="uint64_t">
+  64-bit layer tag derived via SHA-256
+</ResponseField>
+
+Hashes domain separator `Dom::ZTAG` with `canon_tag` and the nonce to produce a unique layer identifier.
+
+## Matrix properties
+
+### Sparse parity check matrix H
+
+- **Dimensions**: `n_bits × m_bits` (default: 16384 × 8192)
+- **Column weight**: Each column has exactly `h_col_wt` ones (default: 192)
+- **Row weight**: Variable, approximately `n * h_col_wt / m ≈ 384` per row
+- **Storage**: Each column stored as a `BitVec` (compressed)
+
+### Syndrome properties
+
+Each syndrome vector from `sigma_from_H()`:
+- Results from XORing `x_col_wt` columns (default: 128)
+- Has approximately `x_col_wt * h_col_wt / 2` ones (ignoring cancellations)
+- Includes `err_wt` additional noise bits (default: 128)
+- Is computationally hard to decode without the secret key
+
+<Note>
+The syndrome decoding problem is related to the syndrome decoding problem for LDPC codes, which is NP-hard.
+</Note>
+
+## Example usage
+
+```cpp
+#include <pvac/crypto/matrix.hpp>
+
+using namespace pvac;
+
+PubKey pk;
+pk.prm = Params(); // default parameters
+pk.canon_tag = csprng_u64();
+
+// Generate parity check matrix
+gen_H(pk);
+
+// Generate public permutation
+pk.ubk = gen_ubk_public(pk.canon_tag, pk.prm.m_bits);
+
+// H and ubk are now ready for encryption
+
+// Generate syndrome for an edge
+uint64_t ztag = prg_layer_ztag(pk.canon_tag, make_nonce128());
+BitVec sigma = sigma_from_H(pk, ztag, make_nonce128(), 0, 0, 0);
+
+// Apply permutation
+BitVec permuted = apply_perm_sigma(sigma, pk.ubk.inv);
+```
+
+## Performance notes
+
+- **gen_H()**: Generates 16384 columns, takes ~10-50ms depending on hardware
+- **gen_ubk_public()**: Generates 8192-element permutation, takes less than 1ms
+- **sigma_from_H()**: Generates one syndrome, takes ~0.1ms
+- **apply_perm_sigma()**: Applies permutation to sparse vector, takes ~0.01ms
+
+All operations are deterministic from their inputs and can be parallelized.
+
+## Related functions
+
+- [`keygen()`](/api/crypto/keygen#keygen) - Calls `gen_H()` and `gen_ubk_public()` during key generation
+- [`prg_choose_k()`](#prg_choose_k) - Used internally for sparse sampling

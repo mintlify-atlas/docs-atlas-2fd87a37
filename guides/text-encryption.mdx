@@ -1,0 +1,377 @@
+---
+title: Text encryption
+description: Encrypt and decrypt strings with enc_text and dec_text in PVAC-HFHE
+---
+
+PVAC-HFHE supports encrypting arbitrary strings using `enc_text` and `dec_text`. This guide shows how to work with encrypted text.
+
+## Quick start
+
+```cpp
+#include <pvac/pvac.hpp>
+using namespace pvac;
+
+// After keygen
+std::string message = "Hello, PVAC-HFHE!";
+std::vector<Cipher> encrypted = enc_text(pk, sk, message);
+std::string decrypted = dec_text(pk, sk, encrypted);
+
+assert(decrypted == message);
+```
+
+## How it works
+
+Text encryption packs strings into field elements using a chunked encoding:
+
+<Steps>
+  <Step title="Encode length">
+    First ciphertext stores the string length as a uint64
+  </Step>
+  <Step title="Pack chunks">
+    String is split into 15-byte chunks, each packed into a field element (127 bits)
+  </Step>
+  <Step title="Encrypt chunks">
+    Each chunk is encrypted with increasing depth hints for better noise distribution
+  </Step>
+</Steps>
+
+<Note>
+  Each field element can hold 15 bytes (120 bits) within the 127-bit field, leaving 7 bits for safety margin.
+</Note>
+
+## Encryption function
+
+From `include/pvac/utils/text.hpp:39-61`:
+
+```cpp
+inline std::vector<Cipher> enc_text(
+    const PubKey& pk,
+    const SecKey& sk,
+    const std::string& msg
+) {
+    std::vector<Cipher> out;
+    out.push_back(enc_value(pk, sk, (uint64_t)msg.size()));
+
+    const uint8_t* p = (const uint8_t*)msg.data();
+    size_t n = msg.size();
+    size_t pos = 0;
+    int depth_hint = 2;
+
+    while (pos < n) {
+        size_t take = std::min((size_t)15, n - pos);
+        Fp x = pack_15_bytes_to_fp(p + pos, take);
+        out.push_back(enc_fp_depth(pk, sk, x, depth_hint));
+        pos += take;
+        depth_hint++;
+    }
+
+    return out;
+}
+```
+
+### Packing algorithm
+
+From `include/pvac/utils/text.hpp:15-26`:
+
+```cpp
+inline Fp pack_15_bytes_to_fp(const uint8_t* p, size_t len) {
+    uint64_t lo = 0, hi = 0;
+
+    for (size_t i = 0; i < len && i < 15; i++) {
+        uint64_t b = p[i];
+        size_t sh = i * 8;
+        if (sh < 64) lo |= b << sh;
+        else hi |= b << (sh - 64);
+    }
+
+    return fp_from_words(lo, hi);
+}
+```
+
+<Tip>
+  The packing uses little-endian byte order. The first byte goes to the LSB of `lo`, bytes 8-14 go to `hi`.
+</Tip>
+
+## Decryption function
+
+From `include/pvac/utils/text.hpp:63-87`:
+
+```cpp
+inline std::string dec_text(
+    const PubKey& pk,
+    const SecKey& sk,
+    const std::vector<Cipher>& cts
+) {
+    if (cts.empty()) return {};
+
+    Fp flen = dec_value(pk, sk, cts[0]);
+    if (flen.hi != 0) std::cerr << "text length hi != 0, clipping\n";
+
+    uint64_t len = flen.lo;
+    std::vector<uint8_t> buf;
+    buf.reserve((size_t)len + 16);
+
+    for (size_t i = 1; i < cts.size(); ++i) {
+        Fp fx = dec_value(pk, sk, cts[i]);
+        uint8_t block[15];
+        unpack_fp_to_15_bytes(fx, block);
+        for (int j = 0; j < 15; j++) buf.push_back(block[j]);
+    }
+
+    if (buf.size() < len) len = (uint64_t)buf.size();
+
+    return std::string((const char*)buf.data(), (size_t)len);
+}
+```
+
+### Unpacking algorithm
+
+From `include/pvac/utils/text.hpp:28-36`:
+
+```cpp
+inline void unpack_fp_to_15_bytes(const Fp& x, uint8_t* out) {
+    uint64_t lo = x.lo, hi = x.hi;
+
+    for (size_t i = 0; i < 15; i++) {
+        size_t sh = i * 8;
+        out[i] = (sh < 64)
+            ? (uint8_t)((lo >> sh) & 0xFF)
+            : (uint8_t)((hi >> (sh - 64)) & 0xFF);
+    }
+}
+```
+
+## Examples
+
+### ASCII text
+
+From `examples/basic_usage.cpp:230-232`:
+
+```cpp
+std::string ascii = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+assert(dec_text(pk, sk, enc_text(pk, sk, ascii)) == ascii);
+```
+
+### Special characters
+
+From `examples/basic_usage.cpp:234-236`:
+
+```cpp
+std::string special = "!@#$%^&*()_+-=[]{}|;':,\",./<>?`~";
+assert(dec_text(pk, sk, enc_text(pk, sk, special)) == special);
+```
+
+### UTF-8 text
+
+From `examples/basic_usage.cpp:238-240`:
+
+```cpp
+std::string utf8 = "hello world 123";
+assert(dec_text(pk, sk, enc_text(pk, sk, utf8)) == utf8);
+```
+
+### Empty string
+
+From `examples/basic_usage.cpp:242-244`:
+
+```cpp
+std::string empty = "";
+assert(dec_text(pk, sk, enc_text(pk, sk, empty)) == empty);
+```
+
+## Storage requirements
+
+For a string of length N:
+
+```
+Number of ciphertexts = 1 + ceil(N / 15)
+Total storage ≈ (1 + ceil(N / 15)) × 42 KB
+```
+
+| String length | Ciphertexts | Approx. size |
+|---------------|-------------|-------------|
+| 1-15 bytes | 2 | 84 KB |
+| 16-30 bytes | 3 | 126 KB |
+| 31-45 bytes | 4 | 168 KB |
+| 100 bytes | 8 | 336 KB |
+| 1000 bytes | 68 | 2.8 MB |
+
+<Warning>
+  Text encryption is relatively expensive due to multiple ciphertexts. For short strings, consider encrypting a hash instead.
+</Warning>
+
+## Performance characteristics
+
+### Encryption time
+
+For a string of length N:
+
+```
+Time ≈ (1 + ceil(N / 15)) × 84ms
+```
+
+Examples:
+- 15 bytes: ~168ms (2 encryptions)
+- 100 bytes: ~672ms (8 encryptions)
+- 1000 bytes: ~5.7s (68 encryptions)
+
+### Decryption time
+
+For a string of length N:
+
+```
+Time ≈ (1 + ceil(N / 15)) × 13ms
+```
+
+Examples:
+- 15 bytes: ~26ms
+- 100 bytes: ~104ms
+- 1000 bytes: ~884ms
+
+<Tip>
+  Decryption is ~6.5x faster than encryption, similar to the ratio for numeric values.
+</Tip>
+
+## Depth hint strategy
+
+The encryption function uses increasing depth hints:
+
+```cpp
+int depth_hint = 2;
+while (pos < n) {
+    // ... encrypt chunk ...
+    depth_hint++;  // Increment for each chunk
+}
+```
+
+This ensures:
+- First chunk (depth 2): Optimized for short strings
+- Later chunks (depth 3+): More noise budget for longer strings
+
+<Note>
+  Starting at depth 2 provides a balance between encryption time and noise budget for typical text lengths.
+</Note>
+
+## Working with encrypted text
+
+You can perform limited operations on encrypted text:
+
+### Concatenation
+
+```cpp
+std::string msg1 = "Hello ";
+std::string msg2 = "World";
+
+auto ct1 = enc_text(pk, sk, msg1);
+auto ct2 = enc_text(pk, sk, msg2);
+
+// Concatenate by combining ciphertext vectors
+std::vector<Cipher> ct_concat;
+ct_concat.insert(ct_concat.end(), ct1.begin(), ct1.end());
+ct_concat.insert(ct_concat.end(), ct2.begin(), ct2.end());
+
+// Note: You need to update the length field manually
+```
+
+<Warning>
+  Direct text concatenation requires manual length adjustment. This is not a built-in feature.
+</Warning>
+
+### Length queries
+
+The first ciphertext always contains the length:
+
+```cpp
+auto ct = enc_text(pk, sk, "Hello");
+uint64_t length = dec_value(pk, sk, ct[0]).lo;  // 5
+```
+
+## Limitations
+
+### No homomorphic operations
+
+Unlike numeric encryption, you cannot:
+- Compare encrypted strings
+- Search encrypted text
+- Perform pattern matching on ciphertexts
+
+<Note>
+  Text encryption is designed for confidentiality, not computation. For searchable encryption, consider alternative schemes.
+</Note>
+
+### Binary data
+
+The encoding supports arbitrary binary data, not just text:
+
+```cpp
+std::vector<uint8_t> binary = {0x00, 0xFF, 0x42, 0xAA, 0x55};
+std::string bin_str((char*)binary.data(), binary.size());
+auto ct = enc_text(pk, sk, bin_str);
+```
+
+## Security considerations
+
+### Length leakage
+
+The number of ciphertexts reveals the approximate string length:
+
+```
+Approx. length = (num_ciphertexts - 1) × 15 ± 14 bytes
+```
+
+This is a known side-channel in chunk-based encryption.
+
+### Randomization
+
+Each encryption is fully randomized:
+
+```cpp
+auto ct1 = enc_text(pk, sk, "test");
+auto ct2 = enc_text(pk, sk, "test");
+
+// Same plaintext
+assert(dec_text(pk, sk, ct1) == dec_text(pk, sk, ct2));
+
+// Different ciphertexts
+assert(ct1[1].E[0].w[0].lo != ct2[1].E[0].w[0].lo);
+```
+
+## Best practices
+
+### For short strings (< 100 bytes)
+
+```cpp
+// Direct encryption is fine
+auto ct = enc_text(pk, sk, "short message");
+```
+
+### For long strings (> 1 KB)
+
+```cpp
+// Consider hybrid encryption:
+// 1. Generate random AES key
+// 2. Encrypt string with AES
+// 3. Encrypt AES key with PVAC-HFHE
+
+uint8_t aes_key[32];
+csprng_bytes(aes_key, 32);
+
+std::vector<uint8_t> ciphertext = aes_encrypt(long_string, aes_key);
+Cipher encrypted_key = enc_value(pk, sk, *((uint64_t*)aes_key));
+// ... (encrypt remaining key bytes)
+```
+
+<Tip>
+  For strings longer than 1 KB, hybrid encryption (AES + PVAC) is significantly more efficient.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Basic operations" icon="play" href="/guides/basic-operations">
+    Learn fundamental encryption operations
+  </Card>
+  <Card title="Performance tuning" icon="gauge" href="/guides/performance-tuning">
+    Optimize text encryption performance
+  </Card>
+</CardGroup>

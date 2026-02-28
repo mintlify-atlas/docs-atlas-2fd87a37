@@ -1,0 +1,249 @@
+---
+title: Detailed comparisons
+description: Comprehensive performance comparison of PVAC-HFHE against BFV, BGV, CKKS, TFHE, and FHEW
+---
+
+This page presents detailed benchmark results comparing PVAC-HFHE against production-optimized FHE schemes from OpenFHE.
+
+## Schemes compared
+
+| Scheme | Type | Implementation | Security |
+|--------|------|----------------|----------|
+| BFV | RLWE, exact integer | OpenFHE 1.2 | 128-bit |
+| BGV | RLWE, exact integer | OpenFHE 1.2 | 128-bit |
+| CKKS | RLWE, approximate | OpenFHE 1.2 | 128-bit |
+| TFHE | Bit-level | OpenFHE 1.2 | 128-bit |
+| FHEW | Bit-level, GINX | OpenFHE 1.2 | 128-bit |
+| PVAC-HFHE | LPN, exact uint64 | PoC/research | 128-bit (est) |
+
+<Info>
+All schemes are configured for 128-bit security. PVAC-HFHE security is based on the Learning Parity with Noise (LPN) problem, which is less studied than RLWE but undergoes active cryptanalytic evaluation.
+</Info>
+
+## Scalar multiplication (ct × ct)
+
+| Scheme | Mode | Time (ms) | vs PVAC |
+|--------|------|-----------|----------|
+| PVAC-HFHE | scalar | 2.47 | 1.0x |
+| BFV | shallow (d=1) | 7.23 | 2.9x slower |
+| BFV | leveled (d=5) | 18.28 | 7.4x slower |
+| BGV | leveled | 17.61 | 7.1x slower |
+| CKKS | leveled | 35.23 | 14.3x slower |
+
+### BFV plaintext modulus comparison
+
+BFV performance varies with plaintext modulus selection:
+
+| Modulus | Bits | Ring dim | Mul time (ms) | CT size |
+|---------|------|----------|---------------|----------|
+| 65537 | 17 | 8192 | 8.81 | 384 KB |
+| 786433 | 20 | 8192 | 8.12 | 384 KB |
+| 2013265921 | 31 | 16384 | 19.75 | 1024 KB |
+
+<Note>
+BFV requires NTT-friendly primes (p-1 must be divisible by 2×ring_dim). PVAC-HFHE has no such constraint and works with arbitrary uint64 values.
+</Note>
+
+## Scalar addition (ct + ct)
+
+Homomorphic addition performance:
+
+| Scheme | Time (ms) | vs PVAC |
+|--------|-----------|----------|
+| PVAC-HFHE | 0.012 | 1.0x |
+| BFV | 0.124 | 10x slower |
+| BGV | 0.552 | 46x slower |
+| CKKS | 1.050 | 87x slower |
+
+PVAC-HFHE's addition operation is extremely fast, ranging from 10x to 87x faster than RLWE schemes.
+
+## Ciphertext size
+
+### Fresh ciphertext comparison
+
+| Scheme | Mode | Size | vs PVAC |
+|--------|------|------|----------|
+| PVAC-HFHE | scalar | 42 KB | 1.0x |
+| BFV | shallow | 256 KB | 6x larger |
+| BFV | leveled | 1024 KB | 24x larger |
+| BGV | leveled | 1792 KB | 43x larger |
+| CKKS | leveled | 3584 KB | 85x larger |
+
+PVAC-HFHE ciphertexts are dramatically smaller, ranging from 6x to 85x smaller than RLWE schemes for fresh encryptions.
+
+### PVAC-HFHE ciphertext growth with depth
+
+<Warning>
+PVAC-HFHE ciphertext size grows exponentially with circuit depth in the current PoC implementation.
+</Warning>
+
+| Depth | Time (ms) | Size | Growth factor |
+|-------|-----------|------|---------------|
+| d0 (fresh) | - | 42 KB | 1.0x |
+| d1 | 2.68 | 34 KB | 0.8x |
+| d2 | 10.34 | 136 KB | 3.2x |
+| d3 | 31.46 | 441 KB | 10.5x |
+| d4 | 97.11 | 1359 KB | 32x |
+| d5 | 285.83 | 4112 KB | 98x |
+
+PVAC-HFHE ciphertext size exceeds BFV leveled at depth 4.
+
+## Circuit depth performance
+
+Performance comparison across different multiplicative depths:
+
+| Depth | PVAC-HFHE | BFV | BGV | CKKS | Fastest |
+|-------|-----------|-----|-----|------|----------|
+| d1 | 2.68 ms | 19.54 ms | 17.40 ms | 35.85 ms | PVAC 7.3x |
+| d2 | 10.34 ms | 14.38 ms | 15.11 ms | 31.22 ms | PVAC 1.4x |
+| d3 | 31.46 ms | 13.98 ms | 14.39 ms | 30.71 ms | BFV 2.3x |
+| d4 | 97.11 ms | 13.84 ms | 11.10 ms | 21.83 ms | BGV 8.7x |
+| d5 | 285.83 ms | 11.37 ms | 9.50 ms | 18.93 ms | BGV 30x |
+
+<Info>
+PVAC-HFHE (PoC) exhibits exponential performance degradation with depth, while RLWE schemes maintain near-constant performance through modulus switching and other optimizations.
+</Info>
+
+## Dot product (scalar vectors)
+
+Vector dot product performance for various vector sizes:
+
+| Size (n) | PVAC-HFHE | BFV | BGV | CKKS | Speedup |
+|----------|-----------|-----|-----|------|----------|
+| 4 | 9.61 ms | 73.24 ms | 74.55 ms | 156.53 ms | 7.6x |
+| 8 | 19.08 ms | 149.68 ms | 152.55 ms | 308.24 ms | 7.8x |
+| 16 | 38.49 ms | 297.02 ms | 294.65 ms | 605.52 ms | 7.7x |
+| 32 | 80.27 ms | 598.94 ms | 626.17 ms | 1218.69 ms | 7.5x |
+
+PVAC-HFHE maintains a consistent 7.5-7.8x speedup across all vector sizes.
+
+## Polynomial evaluation
+
+Evaluating f(x) = 3x³ + 2x² + 5x + 7 (requires depth 3):
+
+| Scheme | Time (ms) | vs PVAC |
+|--------|-----------|----------|
+| PVAC-HFHE | 62.88 | 1.0x |
+| BFV | 71.72 | 1.1x slower |
+| BGV | 92.79 | 1.5x slower |
+| CKKS | 182.35 | 2.9x slower |
+
+For degree-3 polynomials, PVAC-HFHE maintains competitive performance despite depth limitations.
+
+## Bit-level FHE comparison
+
+### NAND gate performance
+
+Single NAND gate evaluation:
+
+| Scheme | Mode | Keygen (ms) | NAND (ms) |
+|--------|------|-------------|------------|
+| FHEW | GINX | 374 | 79.30 |
+| TFHE | std128 | 440 | 81.71 |
+| binfhe_ap | AP | 785 | 102.56 |
+
+### Derived 64-bit multiplication
+
+<Warning>
+These estimates are derived by multiplying NAND gate latency by the number of gates required for 64-bit schoolbook multiplication (24,576 gates) without optimizations. This comparison is primarily academic, as bit-level FHE and scalar FHE solve different problems.
+</Warning>
+
+| Scheme | 64-bit mul time | vs PVAC |
+|--------|-----------------|----------|
+| PVAC-HFHE | 2.47 ms | 1.0x |
+| FHEW | 32.48 min | 789,000x slower |
+| TFHE | 33.47 min | 813,000x slower |
+| binfhe_ap | 42.01 min | 1,020,000x slower |
+
+## TFHE-rs GPU comparison
+
+Comparison with TFHE-rs on both CPU and GPU for 64-bit integer operations:
+
+| Operation | PVAC-HFHE (PoC) | TFHE-rs CPU | TFHE-rs GPU | vs CPU | vs GPU |
+|-----------|-----------------|-------------|-------------|--------|--------|
+| Addition | 0.012 ms | 109 ms | 8.97 ms | 9,083x | 747x |
+| Subtraction | 0.012 ms | 109 ms | 8.97 ms | 9,083x | 747x |
+| Multiplication | 2.47 ms | 402 ms | 31.9 ms | 163x | 13x |
+
+Source: TFHE-rs official benchmarks
+
+## SIMD and batch throughput
+
+### RLWE SIMD performance
+
+RLWE schemes support native SIMD operations:
+
+| Scheme | Slots | Mul time (ms) | Per-slot (μs) |
+|--------|-------|---------------|----------------|
+| BFV | 8192 | 17.85 | 2.18 |
+| CKKS | 4096 | 35.49 | 8.66 |
+
+### PVAC-HFHE parallel throughput
+
+PVAC-HFHE parallel multiplication performance (8 threads):
+
+| Operations | Sequential (ms) | Parallel (ms) | Speedup | Throughput |
+|------------|-----------------|---------------|---------|-------------|
+| 512 | 1391 | 189 | 7.4x | 2711 ops/s |
+| 2048 | 4963 | 795 | 6.2x | 2575 ops/s |
+| 8192 | 19904 | 2608 | 7.6x | 3141 ops/s |
+
+### Throughput comparison
+
+<Info>
+RLWE schemes achieve significantly higher throughput through native SIMD support, while PVAC-HFHE relies on multi-threading.
+</Info>
+
+| Mode | Ops/second | Relative |
+|------|------------|----------|
+| BFV SIMD (8192 slots) | ~459,000 | 146x faster |
+| PVAC-HFHE parallel (8 threads) | ~3,141 | 1.0x |
+
+## Key generation and encryption
+
+Setup and encryption operation performance:
+
+| Scheme | Keygen (ms) | Encrypt (ms) | Decrypt (ms) |
+|--------|-------------|--------------|---------------|
+| BFV | 38.43 | 10.91 | 2.54 |
+| BGV | 62.03 | 12.70 | 3.48 |
+| CKKS | 143.61 | 23.34 | 10.37 |
+| PVAC-HFHE | 858.95 | 84.11 | 13.38 |
+
+<Note>
+PVAC-HFHE key generation is 22x slower and encryption is 8x slower than BFV. This is acceptable for a proof of concept and is primarily due to unoptimized initialization. However, key generation typically only needs to be performed once.
+</Note>
+
+## Key sizes
+
+Public key and ciphertext size comparison:
+
+| Scheme | Public key size | CT size |
+|--------|-----------------|----------|
+| PVAC-HFHE | 8 MB | 42 KB |
+| BFV | - | 1024 KB |
+| BGV | - | 1792 KB |
+| CKKS | - | 3584 KB |
+
+PVAC-HFHE has a larger public key (8 MB) but much smaller ciphertexts for fresh encryptions.
+
+## Performance summary
+
+### Where PVAC-HFHE excels
+
+- Scalar multiplication (2.9-14.3x faster)
+- Scalar addition (10-87x faster)
+- Dot products (7.5-7.8x faster)
+- Fresh ciphertext size (6-85x smaller)
+- Shallow circuits (depth 1-2)
+
+### Where RLWE schemes excel
+
+- Deep circuits (depth ≥ 3)
+- SIMD batch processing (146x higher throughput)
+- Ciphertext size at depth ≥ 4
+- Key generation and encryption speed
+
+<Tip>
+Choose PVAC-HFHE for applications requiring fast scalar arithmetic at shallow depths with minimal ciphertext size. Choose RLWE schemes for deep circuits or batch processing workloads.
+</Tip>

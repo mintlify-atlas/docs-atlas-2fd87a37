@@ -1,0 +1,391 @@
+---
+title: Arithmetic operations
+description: Learn homomorphic addition, subtraction, multiplication, and squaring with ct_add, ct_sub, ct_mul, and ct_square
+---
+
+PVAC-HFHE supports fully homomorphic arithmetic on encrypted data. This guide covers all arithmetic operations with real code examples.
+
+## Overview
+
+All arithmetic operations are in `include/pvac/ops/arithmetic.hpp`:
+
+| Operation | Function | Complexity | Depth increase |
+|-----------|----------|------------|----------------|
+| Addition | `ct_add(pk, a, b)` | O(1) | 0 |
+| Subtraction | `ct_sub(pk, a, b)` | O(1) | 0 |
+| Multiplication | `ct_mul(pk, a, b)` | O(L_a × L_b) | +1 |
+| Squaring | `ct_square(pk, a)` | O(L^2) | +1 |
+
+<Note>
+  Addition and subtraction do not increase circuit depth and are extremely fast (0.012ms). Multiplication increases depth by 1.
+</Note>
+
+## Addition
+
+Add two ciphertexts with `ct_add`:
+
+```cpp
+Cipher ca = enc_value(pk, sk, 42);
+Cipher cb = enc_value(pk, sk, 17);
+Cipher sum = ct_add(pk, ca, cb);
+
+uint64_t result = dec_value(pk, sk, sum).lo;  // 59
+```
+
+### Implementation
+
+From `include/pvac/ops/arithmetic.hpp:165-188`:
+
+```cpp
+inline Cipher ct_add(const PubKey& pk, const Cipher& A, const Cipher& B) {
+    Cipher C;
+    C.slots = A.slots;
+    C.c0 = A.c0.empty() ? B.c0 : B.c0.empty() ? A.c0 : field::Op::add(A.c0, B.c0);
+    C.L.reserve(A.L.size() + B.L.size());
+    C.E.reserve(A.E.size() + B.E.size());
+    
+    C.L = A.L;
+    uint32_t off = static_cast<uint32_t>(A.L.size());
+    
+    std::transform(B.L.begin(), B.L.end(), std::back_inserter(C.L),
+        [off](Layer L) {
+            if (L.rule == RRule::PROD) { L.pa += off; L.pb += off; }
+            return L;
+        });
+    
+    C.E = A.E;
+    std::transform(B.E.begin(), B.E.end(), std::back_inserter(C.E),
+        [off](Edge e) { e.layer_id += off; return e; });
+    
+    guard_budget(pk, C, "add");
+    compact_layers(C);
+    return C;
+}
+```
+
+### Properties
+
+From `examples/basic_usage.cpp:72-73`:
+
+```cpp
+// Identity: x + 0 = x
+CHECK(dec_value(pk, sk, ct_add(pk, ca, c0)).lo == a, "42 + 0 = 42");
+```
+
+Commutative and associative:
+
+```cpp
+// Commutativity: a + b = b + a
+Cipher c_ab = ct_add(pk, ca, cb);
+Cipher c_ba = ct_add(pk, cb, ca);
+assert(dec_value(pk, sk, c_ab).lo == dec_value(pk, sk, c_ba).lo);
+
+// Associativity: (a + b) + c = a + (b + c)
+Cipher cc = enc_value(pk, sk, 7);
+Cipher left = ct_add(pk, ct_add(pk, ca, cb), cc);
+Cipher right = ct_add(pk, ca, ct_add(pk, cb, cc));
+assert(dec_value(pk, sk, left).lo == dec_value(pk, sk, right).lo);
+```
+
+### Performance
+
+From benchmark data:
+- **Time**: 0.012 ms (mean)
+- **10-87x faster** than RLWE schemes (BFV: 0.124ms, CKKS: 1.05ms)
+
+<Tip>
+  Addition is essentially free in PVAC-HFHE—it's just graph concatenation with no cryptographic operations.
+</Tip>
+
+## Subtraction
+
+Subtract ciphertexts with `ct_sub`:
+
+```cpp
+Cipher diff = ct_sub(pk, ca, cb);  // 42 - 17 = 25
+uint64_t result = dec_value(pk, sk, diff).lo;
+```
+
+### Implementation
+
+From `include/pvac/ops/arithmetic.hpp:190-192`:
+
+```cpp
+inline Cipher ct_sub(const PubKey& pk, const Cipher& A, const Cipher& B) {
+    return ct_add(pk, A, ct_neg(pk, B));
+}
+```
+
+Subtraction is implemented as addition with negation:
+
+```cpp
+inline Cipher ct_neg(const PubKey& pk, const Cipher& A) {
+    return ct_scale(pk, A, fp_neg(fp_from_u64(1)));
+}
+```
+
+### Properties
+
+From `examples/basic_usage.cpp:81-82`:
+
+```cpp
+// x - x = 0
+CHECK(dec_value(pk, sk, ct_sub(pk, ca, ca)).lo == 0, "42 - 42 = 0");
+```
+
+Difference of squares:
+
+```cpp
+// (a - b)(a + b) = a² - b²
+Cipher c_amb = ct_sub(pk, ca, cb);
+Cipher c_apb = ct_add(pk, ca, cb);
+Cipher c_diff_prod = ct_mul(pk, c_amb, c_apb);
+
+Cipher c_a_sq = ct_mul(pk, ca, ca);
+Cipher c_b_sq = ct_mul(pk, cb, cb);
+Cipher c_sq_diff = ct_sub(pk, c_a_sq, c_b_sq);
+
+assert(dec_value(pk, sk, c_diff_prod).lo == dec_value(pk, sk, c_sq_diff).lo);
+```
+
+## Multiplication
+
+Multiply ciphertexts with `ct_mul`:
+
+```cpp
+Cipher product = ct_mul(pk, ca, cb);  // 42 * 17 = 714
+uint64_t result = dec_value(pk, sk, product).lo;
+```
+
+### Function signature
+
+From `include/pvac/ops/arithmetic.hpp:194`:
+
+```cpp
+inline Cipher ct_mul(const PubKey& pk, const Cipher& A, const Cipher& B, size_t S = 8)
+```
+
+**Parameters:**
+- `pk`: Public key
+- `A`, `B`: Input ciphertexts
+- `S`: Number of edges per product layer (default 8)
+
+<Warning>
+  The parameter `S` controls the trade-off between ciphertext size and noise. Larger S means more edges but better noise distribution.
+</Warning>
+
+### Properties
+
+From `examples/basic_usage.cpp:75-79`:
+
+```cpp
+// Identity: x * 1 = x
+CHECK(dec_value(pk, sk, ct_mul(pk, ca, c1)).lo == a, "42 * 1 = 42");
+
+// Zero: x * 0 = 0
+CHECK(dec_value(pk, sk, ct_mul(pk, ca, c0)).lo == 0, "42 * 0 = 0");
+```
+
+Commutative and associative:
+
+```cpp
+// Commutativity: a * b = b * a
+assert(dec_value(pk, sk, ct_mul(pk, ca, cb)).lo == 
+       dec_value(pk, sk, ct_mul(pk, cb, ca)).lo);
+
+// Associativity: (a * b) * c = a * (b * c)
+Cipher left = ct_mul(pk, ct_mul(pk, ca, cb), cc);
+Cipher right = ct_mul(pk, ca, ct_mul(pk, cb, cc));
+assert(dec_value(pk, sk, left).lo == dec_value(pk, sk, right).lo);
+```
+
+Distributive property:
+
+```cpp
+// a * (b + c) = a*b + a*c
+Cipher c_bpc = ct_add(pk, cb, cc);
+Cipher left = ct_mul(pk, ca, c_bpc);
+Cipher right = ct_add(pk, ct_mul(pk, ca, cb), ct_mul(pk, ca, cc));
+assert(dec_value(pk, sk, left).lo == dec_value(pk, sk, right).lo);
+```
+
+### Performance
+
+From benchmark data:
+- **Time**: 2.47 ms (mean)
+- **2.9-14.3x faster** than RLWE schemes:
+  - BFV shallow: 7.23ms (2.9x slower)
+  - BFV leveled: 18.28ms (7.4x slower)
+  - CKKS: 35.23ms (14.3x slower)
+
+## Squaring
+
+Square a ciphertext efficiently with `ct_square`:
+
+```cpp
+Cipher squared = ct_square(pk, ca);  // 42² = 1764
+```
+
+### Why use ct_square?
+
+Squaring is more efficient than `ct_mul(pk, a, a)` because it exploits symmetry:
+
+- **ct_mul(a, a)**: Creates L_a × L_a product layers
+- **ct_square(a)**: Creates L_a × (L_a + 1) / 2 layers (triangular)
+
+From `include/pvac/ops/arithmetic.hpp:227-255`:
+
+```cpp
+inline Cipher ct_square(const PubKey& pk, const Cipher& A, size_t S = 8) {
+    auto a0 = A.c0;
+    
+    Cipher A_g = A;
+    A_g.c0 = field::Op::zeros(A.slots);
+    
+    uint32_t LA = static_cast<uint32_t>(A_g.L.size());
+    size_t triangular = static_cast<size_t>(LA) * (LA + 1) / 2;
+    
+    Cipher C = detail::build_product_cipher(pk, A_g, nullptr,
+        [LA](auto&& emit) {
+            for (uint32_t la = 0; la < LA; ++la)
+                for (uint32_t lb = la; lb < LA; ++lb)
+                    emit(la, lb);
+        },
+        [](const auto& gA, const auto&, uint32_t la, uint32_t lb) {
+            auto prod = field::Op::mul(gA[la], gA[lb]);
+            return la != lb ? field::Op::add(prod, prod) : prod;
+        },
+        triangular, S ? S : 1, "square");
+    
+    auto two_a0 = field::Op::add(a0, a0);
+    detail::append_scaled_edges(C.E, A_g.E, two_a0, 0);
+    C.c0 = field::Op::mul(a0, a0);
+    
+    guard_budget(pk, C, "square");
+    compact_layers(C);
+    return C;
+}
+```
+
+## Constant operations
+
+Perform operations with plaintext constants:
+
+### Add constant
+
+```cpp
+Cipher ct = enc_value(pk, sk, 42);
+Cipher result = ct_add_const(pk, ct, 10);  // 42 + 10 = 52
+```
+
+### Multiply constant
+
+```cpp
+Cipher doubled = ct_mul_const(pk, ct, 2);  // 42 * 2 = 84
+```
+
+### Subtract constant
+
+```cpp
+Cipher result = ct_sub_const(pk, ct, 5);  // 42 - 5 = 37
+```
+
+From `include/pvac/ops/arithmetic.hpp:261-291`:
+
+```cpp
+inline Cipher ct_mul_const(const PubKey& pk, const Cipher& A, uint64_t k) {
+    return ct_scale(pk, A, fp_from_u64(k));
+}
+
+inline Cipher ct_add_const(const PubKey&, const Cipher& A, uint64_t k) {
+    Cipher C = A;
+    Fp v = fp_from_u64(k);
+    for (size_t j = 0; j < C.c0.size(); ++j)
+        C.c0[j] = fp_add(C.c0[j], v);
+    return C;
+}
+```
+
+<Tip>
+  Constant operations are extremely fast because they don't require homomorphic operations—just scalar arithmetic on the ciphertext structure.
+</Tip>
+
+## Example: Polynomial evaluation
+
+Evaluate f(x) = x³ + 2x² + 3x + 4 at x = 5:
+
+From `examples/basic_usage.cpp:137-148`:
+
+```cpp
+uint64_t x = 5;
+Cipher cx = enc_value(pk, sk, x);
+Cipher c2 = enc_value(pk, sk, 2);
+Cipher c3 = enc_value(pk, sk, 3);
+Cipher c4 = enc_value(pk, sk, 4);
+
+Cipher cx2 = ct_mul(pk, cx, cx);        // x²
+Cipher cx3 = ct_mul(pk, cx2, cx);       // x³
+
+Cipher c_poly = ct_add(pk,
+    ct_add(pk, ct_add(pk, cx3, ct_mul(pk, c2, cx2)), ct_mul(pk, c3, cx)),
+    c4);
+
+uint64_t poly_r = dec_value(pk, sk, c_poly).lo;  // 194
+uint64_t poly_e = x*x*x + 2*x*x + 3*x + 4;       // 194
+assert(poly_r == poly_e);
+```
+
+## Example: Binomial expansion
+
+Verify (a + b)² = a² + 2ab + b²:
+
+From `examples/basic_usage.cpp:108-118`:
+
+```cpp
+Cipher c_apb = ct_add(pk, ca, cb);
+Cipher c_apb_sq = ct_mul(pk, c_apb, c_apb);
+
+Cipher c_a_sq = ct_mul(pk, ca, ca);
+Cipher c_b_sq = ct_mul(pk, cb, cb);
+Cipher c_ab_prod = ct_mul(pk, ca, cb);
+Cipher c_2ab = ct_add(pk, c_ab_prod, c_ab_prod);
+Cipher c_rhs = ct_add(pk, ct_add(pk, c_a_sq, c_2ab), c_b_sq);
+
+uint64_t lhs_val = dec_value(pk, sk, c_apb_sq).lo;
+uint64_t rhs_val = dec_value(pk, sk, c_rhs).lo;
+assert(lhs_val == rhs_val);
+```
+
+## Example: Fibonacci sequence
+
+Compute fib(10) = 55:
+
+From `examples/basic_usage.cpp:178-186`:
+
+```cpp
+Cipher fib_p = enc_value(pk, sk, 0);
+Cipher fib_c = enc_value(pk, sk, 1);
+
+for (int i = 2; i <= 10; i++) {
+    Cipher fib_n = ct_add(pk, fib_p, fib_c);
+    fib_p = fib_c;
+    fib_c = fib_n;
+}
+
+assert(dec_value(pk, sk, fib_c).lo == 55);
+```
+
+<Note>
+  The Fibonacci computation uses only additions, so it stays at depth 0 and completes very quickly.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Depth management" icon="layer-group" href="/guides/depth-management">
+    Understand circuit depth and noise growth
+  </Card>
+  <Card title="Performance tuning" icon="gauge" href="/guides/performance-tuning">
+    Optimize arithmetic operations
+  </Card>
+</CardGroup>

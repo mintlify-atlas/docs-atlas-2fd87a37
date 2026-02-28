@@ -1,0 +1,376 @@
+---
+title: Encryption operations
+description: Functions for encrypting plaintext values and field elements into ciphertexts
+---
+
+## Overview
+
+The encryption module provides functions for encrypting plaintext values (integers) and field elements into PVAC-HFHE ciphertexts. All encryption operations support multi-slot ciphertexts for SIMD-style computation.
+
+## Core encryption functions
+
+### `enc_value`
+
+Encrypts a single unsigned 64-bit integer into a ciphertext.
+
+```cpp
+Cipher enc_value(const PubKey& pk, const SecKey& sk, uint64_t v)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key for encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key for generating noise
+</ParamField>
+
+<ParamField path="v" type="uint64_t" required>
+  The plaintext value to encrypt
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  A ciphertext encrypting the value with depth 0
+</ResponseField>
+
+#### Description
+
+Encrypts a single integer value using masking and fusion. The plaintext is split into `v + m` and `-m` where `m` is a random mask, then both parts are encrypted and combined.
+
+See: encrypt.hpp:740
+
+---
+
+### `enc_value_depth`
+
+Encrypts a single value with a specific noise budget for a given circuit depth.
+
+```cpp
+Cipher enc_value_depth(const PubKey& pk, const SecKey& sk, uint64_t v, int d)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key for encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key for generating noise
+</ParamField>
+
+<ParamField path="v" type="uint64_t" required>
+  The plaintext value to encrypt
+</ParamField>
+
+<ParamField path="d" type="int" required>
+  Depth hint for noise budget computation
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  A ciphertext with noise budget allocated for depth `d`
+</ResponseField>
+
+#### Description
+
+Encrypts a value with noise budget planned for a circuit of depth `d`. Higher depth values allocate more noise entropy for deeper computations.
+
+See: encrypt.hpp:732
+
+---
+
+### `enc_values`
+
+Encrypts multiple values into a single multi-slot ciphertext.
+
+```cpp
+Cipher enc_values(const PubKey& pk, const SecKey& sk, const std::vector<uint64_t>& v)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key for encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key for generating noise
+</ParamField>
+
+<ParamField path="v" type="const std::vector<uint64_t>&" required>
+  Vector of plaintext values to encrypt in parallel slots
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  A multi-slot ciphertext encrypting all values in parallel
+</ResponseField>
+
+#### Description
+
+Creates a ciphertext with multiple slots, each encrypting one value from the input vector. Enables SIMD-style parallel computation on batched data.
+
+See: encrypt.hpp:753
+
+---
+
+### `enc_values_depth`
+
+Encrypts multiple values with depth-specific noise budget.
+
+```cpp
+Cipher enc_values_depth(const PubKey& pk, const SecKey& sk, const std::vector<uint64_t>& v, int d)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key for encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key for generating noise
+</ParamField>
+
+<ParamField path="v" type="const std::vector<uint64_t>&" required>
+  Vector of plaintext values
+</ParamField>
+
+<ParamField path="d" type="int" required>
+  Depth hint for noise allocation
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Multi-slot ciphertext with depth `d` noise budget
+</ResponseField>
+
+See: encrypt.hpp:744
+
+---
+
+### `enc_zero_depth`
+
+Encrypts the value zero with a specified noise budget.
+
+```cpp
+Cipher enc_zero_depth(const PubKey& pk, const SecKey& sk, int d)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key for encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key for generating noise
+</ParamField>
+
+<ParamField path="d" type="int" required>
+  Depth hint for noise budget
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting zero
+</ResponseField>
+
+#### Description
+
+Generates a zero ciphertext with fresh noise. Used primarily for bootstrapping and recryption operations to refresh noise without changing the encrypted value.
+
+See: encrypt.hpp:757
+
+---
+
+## Field element encryption
+
+### `enc_fp_depth`
+
+Encrypts a field element with specified depth.
+
+```cpp
+Cipher enc_fp_depth(const PubKey& pk, const SecKey& sk, const Fp& v, int d)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="sk" type="SecKey&" required>
+  Secret key
+</ParamField>
+
+<ParamField path="v" type="const Fp&" required>
+  Field element to encrypt
+</ParamField>
+
+<ParamField path="d" type="int" required>
+  Depth hint
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting the field element
+</ResponseField>
+
+See: encrypt.hpp:724
+
+---
+
+### `enc_fp_depth` (multi-slot)
+
+Encrypts a vector of field elements.
+
+```cpp
+Cipher enc_fp_depth(const PubKey& pk, const SecKey& sk, const std::vector<Fp>& v, int d)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key
+</ParamField>
+
+<ParamField path="v" type="const std::vector<Fp>&" required>
+  Vector of field elements
+</ParamField>
+
+<ParamField path="d" type="int" required>
+  Depth hint
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Multi-slot ciphertext
+</ResponseField>
+
+See: encrypt.hpp:720
+
+---
+
+## Utility functions
+
+### `combine_ciphers`
+
+Combines two ciphertexts into a single ciphertext by fusing their layer graphs.
+
+```cpp
+Cipher combine_ciphers(const PubKey& pk, const Cipher& a, const Cipher& b)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="a" type="const Cipher&" required>
+  First ciphertext
+</ParamField>
+
+<ParamField path="b" type="const Cipher&" required>
+  Second ciphertext
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Fused ciphertext with combined layers and edges
+</ResponseField>
+
+#### Description
+
+Merges the layer DAGs and edge sets of two ciphertexts. Layer indices from `b` are offset appropriately. Used internally during encryption and arithmetic operations.
+
+<Note>
+  The function automatically compacts edges if the budget is exceeded.
+</Note>
+
+See: encrypt.hpp:728
+
+---
+
+### `plan_noise`
+
+Computes the noise budget allocation for a given depth.
+
+```cpp
+std::pair<int, int> plan_noise(const PubKey& pk, int depth_hint)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key with parameter set
+</ParamField>
+
+<ParamField path="depth_hint" type="int" required>
+  Expected circuit depth
+</ParamField>
+
+<ResponseField name="return" type="std::pair<int, int>">
+  Pair of `(n2, n3)` where `n2` is the number of 2-tuples and `n3` is the number of 3-tuples to allocate
+</ResponseField>
+
+#### Description
+
+Computes the optimal noise budget based on the parameter set's entropy capacity and the expected circuit depth. The allocation is split between 2-tuples and 3-tuples according to `tuple2_fraction`.
+
+See: encrypt.hpp:643
+
+---
+
+### `sigma_density`
+
+Computes the sigma vector density of a ciphertext.
+
+```cpp
+double sigma_density(const PubKey& pk, const Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="C" type="const Cipher&" required>
+  Ciphertext to analyze
+</ParamField>
+
+<ResponseField name="return" type="double">
+  Density ratio between 0.0 and 1.0
+</ResponseField>
+
+#### Description
+
+Computes the fraction of set bits across all sigma vectors in the ciphertext. A density near 0.5 indicates well-balanced noise. Values far from 0.5 may indicate the need for recryption.
+
+See: encrypt.hpp:648
+
+---
+
+### `compact_edges`
+
+Compacts the edge set by merging edges with the same layer, index, and sign.
+
+```cpp
+void compact_edges(const PubKey& pk, Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="C" type="Cipher&" required>
+  Ciphertext to compact (modified in place)
+</ParamField>
+
+#### Description
+
+Reduces the ciphertext size by merging redundant edges. This operation does not change the encrypted value but improves efficiency.
+
+See: encrypt.hpp:658
+
+---
+
+### `compact_layers`
+
+Removes unused layers from the ciphertext.
+
+```cpp
+void compact_layers(Cipher& C)
+```
+
+<ParamField path="C" type="Cipher&" required>
+  Ciphertext to compact (modified in place)
+</ParamField>
+
+#### Description
+
+Removes layers that are not referenced by any edge and updates layer indices accordingly. Reduces memory footprint without affecting the encrypted value.
+
+See: encrypt.hpp:662

@@ -1,0 +1,129 @@
+---
+title: Introduction
+description: A proof-of-concept implementation of PVAC-HFHE, a fully homomorphic encryption scheme based on Learning with Parity and Noise over a 127-bit prime field
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="PVAC-HFHE Hero Light"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="PVAC-HFHE Hero Dark"
+/>
+
+## What is PVAC-HFHE?
+
+PVAC-HFHE is a fully homomorphic encryption (FHE) library that enables computation on encrypted data without decryption. Built on the assumption of binary parity for learning with noise and arithmetic operations over a 127-bit prime field, it provides a practical implementation for privacy-preserving computation.
+
+<Note>
+  This is a proof-of-concept implementation from early 2024, based on research from the Moscow Institute of Physics and Technology (MIPT) on threshold behavior and fractional colorability of random hypergraphs.
+</Note>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Homomorphic operations" icon="calculator">
+    Perform addition, subtraction, and multiplication on encrypted values without exposing plaintext data.
+  </Card>
+  <Card title="127-bit prime field" icon="shield-halved">
+    Operations over a large prime field provide strong security guarantees while maintaining efficiency.
+  </Card>
+  <Card title="Syndrome graph construction" icon="diagram-project">
+    Uses a dense random k-uniform hypergraph for efficient cryptographic operations.
+  </Card>
+  <Card title="Header-only library" icon="code">
+    Simple integration with just `#include <pvac/pvac.hpp>` and C++17 compiler support.
+  </Card>
+</CardGroup>
+
+## Quick example
+
+Here's a taste of what you can do with PVAC-HFHE:
+
+```cpp
+#include <pvac/pvac.hpp>
+using namespace pvac;
+
+// Generate keys
+Params prm;
+PubKey pk;
+SecKey sk;
+keygen(prm, pk, sk);
+
+// Encrypt values
+Cipher a = enc_value(pk, sk, 42);
+Cipher b = enc_value(pk, sk, 17);
+
+// Compute on encrypted data
+Cipher sum = ct_add(pk, a, b);  // 42 + 17 = 59
+Cipher prod = ct_mul(pk, a, b); // 42 * 17 = 714
+
+// Decrypt results
+auto result_sum = dec_value(pk, sk, sum);   // 59
+auto result_prod = dec_value(pk, sk, prod); // 714
+```
+
+## Use cases
+
+<AccordionGroup>
+  <Accordion title="Privacy-preserving machine learning">
+    Train and evaluate ML models on encrypted data, enabling secure data collaboration without exposing sensitive information.
+  </Accordion>
+  <Accordion title="Secure cloud computation">
+    Offload computation to untrusted cloud servers while keeping your data encrypted end-to-end.
+  </Accordion>
+  <Accordion title="Confidential analytics">
+    Perform statistical analysis and aggregations on encrypted datasets without revealing individual values.
+  </Accordion>
+  <Accordion title="Encrypted database queries">
+    Execute queries on encrypted databases, maintaining data privacy even during computation.
+  </Accordion>
+</AccordionGroup>
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card
+    title="Installation"
+    icon="download"
+    href="/installation"
+  >
+    Set up PVAC-HFHE in your C++17 project in minutes.
+  </Card>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Build your first homomorphic encryption application.
+  </Card>
+  <Card
+    title="Core concepts"
+    icon="book"
+    href="/concepts/overview"
+  >
+    Understand the cryptographic foundations of PVAC-HFHE.
+  </Card>
+  <Card
+    title="API reference"
+    icon="code"
+    href="/api/core/types"
+  >
+    Explore the complete API documentation.
+  </Card>
+</CardGroup>
+
+## Requirements
+
+PVAC-HFHE has minimal dependencies:
+
+- **C++ Standard**: C++17 or later
+- **Compiler**: GCC 9+, Clang 10+, or MSVC 2019+
+- **CPU**: x86-64 architecture with PCLMUL support (recommended for optimal performance)
+
+<Tip>
+  PCLMUL (carry-less multiplication) instructions significantly improve cryptographic operation performance. Most modern x86-64 processors support this feature.
+</Tip>

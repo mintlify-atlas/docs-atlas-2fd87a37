@@ -1,0 +1,319 @@
+---
+title: Toeplitz operations
+description: Toeplitz matrix multiplication for hash compression in PVAC-HFHE
+---
+
+The Toeplitz module implements efficient Toeplitz matrix multiplication over GF(2) for compressing LPN outputs to 127 bits.
+
+## Main function
+
+### toep_127()
+
+Multiplies a Toeplitz matrix by a bit vector, returning the first 127 bits.
+
+```cpp
+void toep_127(
+    const std::vector<uint64_t>& top,
+    const std::vector<uint64_t>& ybits,
+    uint64_t& out_lo,
+    uint64_t& out_hi
+)
+```
+
+<ParamField path="top" type="const std::vector<uint64_t>&">
+  First row and column of the Toeplitz matrix, packed as 64-bit words. Length should be `(lpn_t + 127 + 63) / 64` words.
+</ParamField>
+
+<ParamField path="ybits" type="const std::vector<uint64_t>&">
+  Input bit vector (LPN output), packed as 64-bit words. Length should be `(lpn_t + 63) / 64` words.
+</ParamField>
+
+<ParamField path="out_lo" type="uint64_t&">
+  Output: lower 64 bits of the result
+</ParamField>
+
+<ParamField path="out_hi" type="uint64_t&">
+  Output: upper 63 bits of the result (most significant bit should be 0)
+</ParamField>
+
+#### Algorithm
+
+A Toeplitz matrix has constant diagonals:
+
+```
+T[i][j] = top[i - j]  for i ≥ j
+T[i][j] = top[j - i]  for i < j
+```
+
+The multiplication `z = T * y` is computed via GF(2) convolution:
+1. Perform binary polynomial multiplication: `R = top ⊗ ybits`
+2. Extract bits 0-126 from R as the output
+
+The function automatically selects the fastest available implementation.
+
+<Note>
+This function performs runtime dispatch to choose between scalar, PCLMUL (x86), or PMULL (ARM) implementations based on hardware capabilities.
+</Note>
+
+## Implementation variants
+
+### toep_127_scalar()
+
+Portable scalar implementation.
+
+```cpp
+void toep_127_scalar(
+    const std::vector<uint64_t>& top,
+    const std::vector<uint64_t>& ybits,
+    uint64_t& out_lo,
+    uint64_t& out_hi
+)
+```
+
+Uses `gf2_conv_scalar()` for binary polynomial multiplication without hardware acceleration.
+
+### toep_127_clmul()
+
+Hardware-accelerated implementation using Intel PCLMUL.
+
+```cpp
+void toep_127_clmul(
+    const std::vector<uint64_t>& top,
+    const std::vector<uint64_t>& ybits,
+    uint64_t& out_lo,
+    uint64_t& out_hi
+)
+```
+
+Requires:
+- x86-64 architecture
+- PCLMUL instruction support
+- Compile with `-mpclmul` or `-march=native`
+
+Uses `_mm_clmulepi64_si128` intrinsic for fast carryless multiplication.
+
+### toep_127_pmull()
+
+Hardware-accelerated implementation for ARM NEON.
+
+```cpp
+void toep_127_pmull(
+    const std::vector<uint64_t>& top,
+    const std::vector<uint64_t>& ybits,
+    uint64_t& out_lo,
+    uint64_t& out_hi
+)
+```
+
+Requires:
+- ARM64 (AArch64) architecture
+- Crypto extensions
+- Compile with `-march=armv8-a+crypto`
+
+Uses `vmull_p64` intrinsic for polynomial multiplication.
+
+## Binary polynomial multiplication
+
+### gf2_conv_scalar()
+
+Scalar GF(2) convolution.
+
+```cpp
+void gf2_conv_scalar(
+    const std::vector<uint64_t>& A,
+    const std::vector<uint64_t>& B,
+    std::vector<uint64_t>& R
+)
+```
+
+<ParamField path="A" type="const std::vector<uint64_t>&">
+  First polynomial (bit-packed)
+</ParamField>
+
+<ParamField path="B" type="const std::vector<uint64_t>&">
+  Second polynomial (bit-packed)
+</ParamField>
+
+<ParamField path="R" type="std::vector<uint64_t>&">
+  Output: product polynomial with length `A.size() + B.size()`
+</ParamField>
+
+Computes `R(x) = A(x) · B(x)` in GF(2)[x] using the standard schoolbook algorithm:
+- For each set bit at position `i` in A
+- For each word in B
+- XOR shifted B into R at position `i`
+
+### gf2_conv_clmul()
+
+PCLMUL-accelerated GF(2) convolution.
+
+```cpp
+void gf2_conv_clmul(
+    const std::vector<uint64_t>& A,
+    const std::vector<uint64_t>& B,
+    std::vector<uint64_t>& R
+)
+```
+
+Same interface as `gf2_conv_scalar()`, but uses `_mm_clmulepi64_si128` for 64×64→128 bit carryless multiplication.
+
+### gf2_conv_pmull()
+
+PMULL-accelerated GF(2) convolution for ARM.
+
+```cpp
+void gf2_conv_pmull(
+    const std::vector<uint64_t>& A,
+    const std::vector<uint64_t>& B,
+    std::vector<uint64_t>& R
+)
+```
+
+Same interface as `gf2_conv_scalar()`, but uses `vmull_p64` for polynomial multiplication on ARM64.
+
+## Runtime selection
+
+### select_toeplitz()
+
+Benchmarks available implementations and selects the fastest.
+
+```cpp
+void select_toeplitz()
+```
+
+This function is called automatically on the first call to `toep_127()`. It:
+1. Tests all available implementations (scalar, PCLMUL, PMULL)
+2. Benchmarks each on typical inputs
+3. Selects the fastest implementation
+4. Stores the selection in global variable `g_toep`
+
+The benchmark performs 64 iterations with 4096-bit inputs and measures microseconds per call.
+
+<Note>
+The selection is cached in a global variable, so it only runs once per program execution.
+</Note>
+
+### Global variables
+
+```cpp
+toep_fn g_toep = nullptr;  // Selected implementation function pointer
+int g_toep_id = 0;         // Implementation ID (1=PCLMUL, 2=PMULL, 3=scalar)
+```
+
+## Toeplitz matrix properties
+
+### Structure
+
+A Toeplitz matrix has the form:
+
+```
+     j=0  j=1  j=2  j=3 ...
+i=0 [ t₀   t₁   t₂   t₃  ...]
+i=1 [ t₋₁  t₀   t₁   t₂  ...]
+i=2 [ t₋₂  t₋₁  t₀   t₁  ...]
+i=3 [ t₋₃  t₋₂  t₋₁  t₀  ...]
+...
+```
+
+Each diagonal has a constant value.
+
+### Universal hashing
+
+Random Toeplitz matrices form a family of universal hash functions:
+- **Uniformity**: For random T and fixed x ≠ y, Pr[Tx = Ty] ≤ 2^(-127)
+- **Compression**: Maps `lpn_t` bits (16384) to 127 bits
+- **Efficiency**: Computable via fast convolution
+
+### Security role
+
+In PVAC-HFHE, Toeplitz hashing serves as a randomness extractor:
+1. LPN outputs `lpn_t = 16384` bits with ~11000 bits min-entropy
+2. Toeplitz extraction produces 127 nearly-uniform bits
+3. Result is hashed to a field element via `hash_to_fp_nonzero()`
+
+This provides statistical security for the PRF output.
+
+## Performance characteristics
+
+### Benchmarks (approximate, varies by hardware)
+
+| Implementation | Architecture | Time per call |
+|----------------|--------------|---------------|
+| toep_127_scalar | Any | ~150 μs |
+| toep_127_clmul | x86-64 + PCLMUL | ~15 μs |
+| toep_127_pmull | ARM64 + Crypto | ~20 μs |
+
+Hardware acceleration provides ~7-10× speedup over scalar implementation.
+
+### Optimization notes
+
+- The convolution is computed over `(lpn_t + 127)` bits
+- Only the first 127 output bits are extracted
+- Sparse inputs (few set bits) benefit from early termination
+- Hardware implementations use SIMD parallelism
+
+<Warning>
+Compiling without hardware support flags (e.g., missing `-mpclmul`) will fall back to scalar mode, significantly reducing performance.
+</Warning>
+
+## Example usage
+
+```cpp
+#include <pvac/crypto/toeplitz.hpp>
+
+using namespace pvac;
+
+// Generate random Toeplitz matrix (first row + column)
+size_t top_words = (16384 + 127 + 63) / 64;
+std::vector<uint64_t> top(top_words);
+for (auto& w : top) w = csprng_u64();
+
+// Generate random input vector
+size_t y_words = (16384 + 63) / 64;
+std::vector<uint64_t> y(y_words);
+for (auto& w : y) w = csprng_u64();
+
+// Compute Toeplitz matrix-vector product
+uint64_t lo, hi;
+toep_127(top, y, lo, hi);
+
+// lo and hi now contain the 127-bit result
+// (lo = bits 0-63, hi = bits 64-126)
+```
+
+## Implementation details
+
+### Bit extraction
+
+After convolution, the code extracts bits 0-126:
+
+```cpp
+for (int j = 0; j < 127; j++) {
+    size_t wi = j >> 6;          // word index
+    int sh = j & 63;             // bit shift
+    uint64_t bit = (R[wi] >> sh) & 1ull;
+    if (j < 64) out_lo |= bit << j;
+    else out_hi |= bit << (j - 64);
+}
+```
+
+This produces two 64-bit words with the upper word having bit 63 clear.
+
+### Intrinsics used
+
+**x86-64 PCLMUL:**
+```cpp
+__m128i p = _mm_clmulepi64_si128(va, vb, 0x00);
+```
+
+**ARM64 PMULL:**
+```cpp
+poly128_t p = vmull_p64(pa, pb);
+```
+
+Both instructions compute 64×64→128 bit carryless multiplication in a single cycle.
+
+## Related functions
+
+- [`prf_R_core()`](/api/crypto/lpn#prf_r_core) - Uses `toep_127()` for randomness extraction
+- [`lpn_make_ybits()`](/api/crypto/lpn#lpn_make_ybits) - Generates the input to Toeplitz hashing

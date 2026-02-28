@@ -1,0 +1,317 @@
+---
+title: LPN operations
+description: Learning Parity with Noise functions for PVAC-HFHE encryption
+---
+
+The LPN module implements the Learning Parity with Noise primitive used for pseudorandom function evaluation in PVAC-HFHE.
+
+## Core functions
+
+### prf_R()
+
+Evaluates the main pseudorandom function to generate a randomizer element.
+
+```cpp
+Fp prf_R(const PubKey& pk, const SecKey& sk, const RSeed& seed)
+```
+
+<ParamField path="pk" type="const PubKey&">
+  Public key containing system parameters
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&">
+  Secret key containing PRF keys and LPN secret
+</ParamField>
+
+<ParamField path="seed" type="const RSeed&">
+  Seed containing `ztag` and 128-bit nonce
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  A nonzero field element in the prime field
+</ResponseField>
+
+This function computes three independent LPN evaluations and multiplies them together for enhanced security. It uses domain separators `PRF_R1`, `PRF_R2`, and `PRF_R3`.
+
+### prf_R_noise()
+
+Evaluates the noise pseudorandom function.
+
+```cpp
+Fp prf_R_noise(const PubKey& pk, const SecKey& sk, const RSeed& seed)
+```
+
+<ParamField path="pk" type="const PubKey&">
+  Public key containing system parameters
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&">
+  Secret key containing PRF keys and LPN secret
+</ParamField>
+
+<ParamField path="seed" type="const RSeed&">
+  Seed containing `ztag` and 128-bit nonce
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  A nonzero field element representing cryptographic noise
+</ResponseField>
+
+Similar to `prf_R()` but uses noise-specific domain separators (`PRF_NOISE1`, `PRF_NOISE2`, `PRF_NOISE3`) for domain separation.
+
+### prf_R_core()
+
+Core LPN evaluation function used internally.
+
+```cpp
+Fp prf_R_core(
+    const PubKey& pk,
+    const SecKey& sk,
+    const RSeed& seed,
+    const char* dom
+)
+```
+
+<ParamField path="pk" type="const PubKey&">
+  Public key containing system parameters
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&">
+  Secret key containing PRF keys and LPN secret
+</ParamField>
+
+<ParamField path="seed" type="const RSeed&">
+  Seed for deterministic randomness
+</ParamField>
+
+<ParamField path="dom" type="const char*">
+  Domain separator string for cryptographic separation
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  A nonzero field element derived from LPN evaluation
+</ResponseField>
+
+#### Evaluation process
+
+1. **Generate LPN response** - Computes `y = As + e` where:
+   - `A` is a random matrix derived from the seed
+   - `s` is the LPN secret from the secret key
+   - `e` is Bernoulli noise with parameter `tau = lpn_tau_num/lpn_tau_den`
+
+2. **Apply Toeplitz hash** - Uses a Toeplitz matrix multiplication to compress the LPN output to 127 bits
+
+3. **Hash to field** - Maps the 127-bit output to a nonzero field element
+
+### lpn_make_ybits()
+
+Generates the LPN response vector `y = As + e`.
+
+```cpp
+void lpn_make_ybits(
+    const PubKey& pk,
+    const SecKey& sk,
+    const RSeed& seed,
+    const char* dom,
+    std::vector<uint64_t>& ybits
+)
+```
+
+<ParamField path="pk" type="const PubKey&">
+  Public key containing LPN parameters `lpn_n`, `lpn_t`, `lpn_tau_num`, `lpn_tau_den`
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&">
+  Secret key containing the LPN secret bits `lpn_s_bits`
+</ParamField>
+
+<ParamField path="seed" type="const RSeed&">
+  Seed for generating the random matrix
+</ParamField>
+
+<ParamField path="dom" type="const char*">
+  Domain separator string
+</ParamField>
+
+<ParamField path="ybits" type="std::vector<uint64_t>&">
+  Output parameter receiving the computed bit vector (length `lpn_t` bits)
+</ParamField>
+
+#### Algorithm
+
+For each row `r = 0` to `lpn_t - 1`:
+1. Generate random row vector from PRG
+2. Compute dot product with secret: `dot = row · s`
+3. Generate noise bit: `e = 1` with probability `tau`, else `e = 0`
+4. Set output bit: `y[r] = dot ⊕ e`
+
+<Note>
+The noise parameter `tau = lpn_tau_num / lpn_tau_den` determines the noise rate. Default is `tau = 1/8`.
+</Note>
+
+## Cryptographic primitives
+
+### derive_aes_key()
+
+Derives an AES-256 key and nonce from the secret key and seed.
+
+```cpp
+void derive_aes_key(
+    const PubKey& pk,
+    const SecKey& sk,
+    const RSeed& seed,
+    const char* dom,
+    uint8_t out_key[32],
+    uint64_t& out_nonce
+)
+```
+
+<ParamField path="pk" type="const PubKey&">
+  Public key (used for `canon_tag` and `H_digest`)
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&">
+  Secret key containing PRF keys
+</ParamField>
+
+<ParamField path="seed" type="const RSeed&">
+  Seed for key derivation
+</ParamField>
+
+<ParamField path="dom" type="const char*">
+  Domain separator string
+</ParamField>
+
+<ParamField path="out_key" type="uint8_t[32]">
+  Output buffer for 256-bit AES key
+</ParamField>
+
+<ParamField path="out_nonce" type="uint64_t&">
+  Output parameter for the derived nonce
+</ParamField>
+
+The key is derived using SHA-256 over:
+- The 4 PRF keys from the secret key
+- The public key's `canon_tag`
+- The H matrix digest
+- The seed's `ztag` and `nonce`
+- The domain separator hash
+
+### hash_to_fp_nonzero()
+
+Maps 127 bits to a nonzero field element.
+
+```cpp
+Fp hash_to_fp_nonzero(uint64_t lo, uint64_t hi)
+```
+
+<ParamField path="lo" type="uint64_t">
+  Lower 64 bits
+</ParamField>
+
+<ParamField path="hi" type="uint64_t">
+  Upper 63 bits (most significant bit should be 0)
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  A nonzero field element in constant time
+</ResponseField>
+
+If the input is zero, returns the field element `1` using constant-time masking to prevent timing attacks.
+
+### fnv1a_domain()
+
+Computes a 64-bit hash of a domain separator string.
+
+```cpp
+uint64_t fnv1a_domain(const char* dom)
+```
+
+<ParamField path="dom" type="const char*">
+  Null-terminated domain separator string
+</ParamField>
+
+<ResponseField name="return" type="uint64_t">
+  64-bit FNV-1a hash
+</ResponseField>
+
+Uses the FNV-1a algorithm for fast, non-cryptographic hashing of domain separators.
+
+## AES-CTR implementation
+
+### AesCtr256
+
+Hardware-accelerated AES-256 in counter mode.
+
+```cpp
+struct AesCtr256 {
+    void init(const uint8_t key[32], uint64_t nonce);
+    uint64_t next_u64();
+    void fill_u64(uint64_t* out, size_t n);
+    uint64_t bounded(uint64_t M);
+};
+```
+
+#### Methods
+
+<ParamField path="init" type="void(const uint8_t[32], uint64_t)">
+  Initialize the cipher with a 256-bit key and 64-bit nonce
+</ParamField>
+
+<ParamField path="next_u64" type="uint64_t()">
+  Generate the next 64-bit pseudorandom value
+</ParamField>
+
+<ParamField path="fill_u64" type="void(uint64_t*, size_t)">
+  Fill an array with `n` pseudorandom 64-bit values
+</ParamField>
+
+<ParamField path="bounded" type="uint64_t(uint64_t)">
+  Generate a uniformly random value in `[0, M)` without bias
+</ParamField>
+
+<Warning>
+This implementation requires AES-NI support. The library will fail to compile without `-maes` or `-march=native` on x86_64.
+</Warning>
+
+## Security parameters
+
+The default LPN parameters provide:
+
+- **Information-theoretic bound**: 2226 bits
+- **Classical security**: 200+ bits
+- **Quantum security**: 100+ bits
+
+These estimates assume:
+- `lpn_n = 4096` (secret dimension)
+- `lpn_t = 16384` (number of samples)
+- `tau = 1/8` (noise rate)
+
+<Note>
+The triple evaluation in `prf_R()` and `prf_R_noise()` amplifies security beyond a single LPN call.
+</Note>
+
+## Example usage
+
+```cpp
+#include <pvac/crypto/lpn.hpp>
+
+using namespace pvac;
+
+PubKey pk;
+SecKey sk;
+RSeed seed = { ztag, make_nonce128() };
+
+// Evaluate PRF
+Fp r = prf_R(pk, sk, seed);
+
+// Evaluate noise PRF
+Fp noise = prf_R_noise(pk, sk, seed);
+
+// Both r and noise are nonzero field elements
+```
+
+## Related functions
+
+- [`toep_127()`](/api/crypto/toeplitz#toep_127) - Toeplitz matrix hashing
+- [`keygen()`](/api/crypto/keygen#keygen) - Generates LPN secret during key generation

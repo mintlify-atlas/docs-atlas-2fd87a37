@@ -1,0 +1,332 @@
+---
+title: Polynomial evaluation
+description: Evaluate polynomials on encrypted data using PVAC-HFHE
+---
+
+This example demonstrates how to evaluate polynomials homomorphically using PVAC-HFHE. You can compute polynomial functions on encrypted values without decrypting them.
+
+## Overview
+
+Polynomial evaluation is a fundamental operation in homomorphic encryption with applications in:
+
+- Private function evaluation
+- Approximating non-linear functions
+- Machine learning activation functions
+- Statistical computations
+
+## Basic polynomial: f(x) = x³ + 2x² + 3x + 4
+
+Let's evaluate a cubic polynomial at x = 5:
+
+<Steps>
+  <Step title="Encrypt the input and coefficients">
+    First, encrypt the input value and any coefficients needed:
+
+    ```cpp
+    #include <pvac/pvac.hpp>
+    using namespace pvac;
+
+    // Setup
+    Params prm;
+    PubKey pk;
+    SecKey sk;
+    keygen(prm, pk, sk);
+
+    // Encrypt input x = 5
+    uint64_t x = 5;
+    Cipher cx = enc_value(pk, sk, x);
+
+    // Encrypt coefficients
+    Cipher c2 = enc_value(pk, sk, 2);
+    Cipher c3 = enc_value(pk, sk, 3);
+    Cipher c4 = enc_value(pk, sk, 4);
+    ```
+  </Step>
+
+  <Step title="Compute powers of x">
+    Calculate x², x³ homomorphically:
+
+    ```cpp
+    // x^2
+    Cipher cx2 = ct_mul(pk, cx, cx);
+
+    // x^3 = x^2 * x
+    Cipher cx3 = ct_mul(pk, cx2, cx);
+    ```
+  </Step>
+
+  <Step title="Evaluate the polynomial">
+    Combine the terms using homomorphic operations:
+
+    ```cpp
+    // f(x) = x^3 + 2*x^2 + 3*x + 4
+    Cipher term1 = cx3;                      // x^3
+    Cipher term2 = ct_mul(pk, c2, cx2);      // 2*x^2
+    Cipher term3 = ct_mul(pk, c3, cx);       // 3*x
+    Cipher term4 = c4;                       // 4
+
+    // Sum all terms
+    Cipher result = ct_add(pk, ct_add(pk, ct_add(pk, term1, term2), term3), term4);
+    ```
+
+    <Note>
+    You can also write this more compactly as a single nested expression.
+    </Note>
+  </Step>
+
+  <Step title="Decrypt and verify">
+    Decrypt the result and verify correctness:
+
+    ```cpp
+    uint64_t poly_result = dec_value(pk, sk, result).lo;
+    uint64_t expected = x*x*x + 2*x*x + 3*x + 4;  // = 125 + 50 + 15 + 4 = 194
+
+    std::cout << "f(5) = " << poly_result << std::endl;  // 194
+    assert(poly_result == expected);
+    ```
+  </Step>
+</Steps>
+
+## Complete example
+
+Here's the full code for evaluating f(x) = x³ + 2x² + 3x + 4:
+
+```cpp
+#include <iostream>
+#include <pvac/pvac.hpp>
+
+using namespace pvac;
+
+int main() {
+    // Key generation
+    Params prm;
+    PubKey pk;
+    SecKey sk;
+    keygen(prm, pk, sk);
+    
+    // Encrypt input and coefficients
+    uint64_t x = 5;
+    Cipher cx = enc_value(pk, sk, x);
+    Cipher c2 = enc_value(pk, sk, 2);
+    Cipher c3 = enc_value(pk, sk, 3);
+    Cipher c4 = enc_value(pk, sk, 4);
+    
+    // Compute powers
+    Cipher cx2 = ct_mul(pk, cx, cx);
+    Cipher cx3 = ct_mul(pk, cx2, cx);
+    
+    // Evaluate polynomial: x^3 + 2*x^2 + 3*x + 4
+    Cipher result = ct_add(pk,
+                       ct_add(pk,
+                           ct_add(pk, cx3, ct_mul(pk, c2, cx2)),
+                           ct_mul(pk, c3, cx)),
+                       c4);
+    
+    // Decrypt and verify
+    uint64_t poly_result = dec_value(pk, sk, result).lo;
+    uint64_t expected = x*x*x + 2*x*x + 3*x + 4;  // 194
+    
+    std::cout << "f(" << x << ") = " << poly_result << std::endl;
+    std::cout << "Expected: " << expected << std::endl;
+    std::cout << "Match: " << (poly_result == expected ? "YES" : "NO") << std::endl;
+    
+    return 0;
+}
+```
+
+## Optimizing polynomial evaluation
+
+### Using Horner's method
+
+For better efficiency, use Horner's method to reduce the number of multiplications:
+
+```cpp
+// f(x) = x^3 + 2*x^2 + 3*x + 4
+// Horner: f(x) = ((x + 2)*x + 3)*x + 4
+
+Cipher result = ct_add(pk, cx, c2);           // x + 2
+result = ct_mul(pk, result, cx);              // (x + 2)*x
+result = ct_add(pk, result, c3);              // (x + 2)*x + 3
+result = ct_mul(pk, result, cx);              // ((x + 2)*x + 3)*x
+result = ct_add(pk, result, c4);              // ((x + 2)*x + 3)*x + 4
+```
+
+<Tip>
+Horner's method reduces circuit depth and the number of operations, improving performance for high-degree polynomials.
+</Tip>
+
+### Using constant multiplication
+
+When coefficients are public, use `ct_mul_const` for better performance:
+
+```cpp
+// Coefficients are public constants
+Cipher term2 = ct_mul_const(pk, cx2, 2);      // 2*x^2
+Cipher term3 = ct_mul_const(pk, cx, 3);       // 3*x
+
+Cipher result = ct_add(pk, ct_add(pk, ct_add(pk, cx3, term2), term3), c4);
+```
+
+## Higher-degree polynomials
+
+### Computing high powers efficiently
+
+Use repeated squaring for efficient power computation:
+
+```cpp
+// Compute x^8 with only 3 multiplications
+Cipher cx_1 = enc_value(pk, sk, 2);
+Cipher cx_2 = ct_mul(pk, cx_1, cx_1);  // x^2
+Cipher cx_4 = ct_mul(pk, cx_2, cx_2);  // x^4
+Cipher cx_8 = ct_mul(pk, cx_4, cx_4);  // x^8
+
+assert(dec_value(pk, sk, cx_8).lo == 256);  // 2^8 = 256
+
+// Can go even higher
+Cipher cx_16 = ct_mul(pk, cx_8, cx_8);  // x^16
+assert(dec_value(pk, sk, cx_16).lo == 65536);  // 2^16 = 65536
+```
+
+<Note>
+The circuit depth grows logarithmically with the exponent when using repeated squaring, making it practical to compute high powers.
+</Note>
+
+## Circuit depth analysis
+
+Different evaluation strategies result in different circuit depths:
+
+```cpp
+// Direct method: depth = 3
+// x^3 (depth 2) + 2*x^2 (depth 2) + 3*x (depth 1) + 4
+Cipher cx2 = ct_mul(pk, cx, cx);              // depth 1
+Cipher cx3 = ct_mul(pk, cx2, cx);             // depth 2
+Cipher result = ct_add(pk, cx3, ...);         // depth 3
+
+std::cout << "Layers: " << result.L.size() << std::endl;
+std::cout << "Edges: " << result.E.size() << std::endl;
+```
+
+The `L.size()` field shows the number of layers (circuit depth), while `E.size()` shows the total number of edges in the computation graph.
+
+## Nested expressions
+
+Evaluate complex nested expressions:
+
+```cpp
+// f(a, b, c) = ((a + b) * c - a) * b
+// With a=3, b=5, c=7
+
+uint64_t va = 3, vb = 5, vc = 7;
+Cipher cva = enc_value(pk, sk, va);
+Cipher cvb = enc_value(pk, sk, vb);
+Cipher cvc = enc_value(pk, sk, vc);
+
+Cipher result = ct_mul(pk,
+                   ct_sub(pk,
+                       ct_mul(pk,
+                           ct_add(pk, cva, cvb),  // (a + b)
+                           cvc),                  // * c
+                       cva),                      // - a
+                   cvb);                          // * b
+
+uint64_t computed = dec_value(pk, sk, result).lo;
+uint64_t expected = ((va + vb) * vc - va) * vb;  // ((3 + 5) * 7 - 3) * 5 = 275
+
+assert(computed == expected);
+```
+
+## Multivariate polynomials
+
+Evaluate polynomials with multiple variables:
+
+```cpp
+// f(x, y) = x^2 + 2*x*y + y^2 = (x + y)^2
+
+uint64_t x = 7, y = 3;
+Cipher cx = enc_value(pk, sk, x);
+Cipher cy = enc_value(pk, sk, y);
+
+// Method 1: Direct expansion
+Cipher cx2 = ct_mul(pk, cx, cx);
+Cipher cy2 = ct_mul(pk, cy, cy);
+Cipher cxy = ct_mul(pk, cx, cy);
+Cipher c2xy = ct_add(pk, cxy, cxy);
+Cipher result1 = ct_add(pk, ct_add(pk, cx2, c2xy), cy2);
+
+// Method 2: Using (x + y)^2
+Cipher cxpy = ct_add(pk, cx, cy);
+Cipher result2 = ct_mul(pk, cxpy, cxpy);
+
+// Both methods give same result
+assert(dec_value(pk, sk, result1).lo == dec_value(pk, sk, result2).lo);
+assert(dec_value(pk, sk, result1).lo == 100);  // (7 + 3)^2 = 100
+```
+
+## Applications
+
+### Activation functions in ML
+
+Polynomials can approximate non-linear activation functions:
+
+```cpp
+// Cubic activation: f(x) = x^3
+Cipher activation(const PubKey& pk, const Cipher& x) {
+    Cipher x2 = ct_mul(pk, x, x);
+    return ct_mul(pk, x2, x);
+}
+
+// Use in neural network layer
+Cipher input = enc_value(pk, sk, 5);
+Cipher activated = activation(pk, input);
+assert(dec_value(pk, sk, activated).lo == 125);  // 5^3 = 125
+```
+
+### Private threshold functions
+
+Evaluate comparison thresholds privately:
+
+```cpp
+// Approximate step function using polynomial
+// f(x) = x^3 - threshold*x^2
+uint64_t threshold = 10;
+Cipher cx = enc_value(pk, sk, x);
+Cipher cthresh = enc_value(pk, sk, threshold);
+
+Cipher cx2 = ct_mul(pk, cx, cx);
+Cipher cx3 = ct_mul(pk, cx2, cx);
+Cipher threshold_term = ct_mul(pk, cthresh, cx2);
+Cipher result = ct_sub(pk, cx3, threshold_term);
+
+// Sign of result indicates if x > threshold
+int64_t score = dec_value(pk, sk, result).lo;
+```
+
+## Performance considerations
+
+<Tip>
+**Circuit depth optimization**: Keep polynomial degree low to minimize circuit depth. For high-degree polynomials, consider using Horner's method or approximating with lower-degree polynomials.
+</Tip>
+
+<Tip>
+**Coefficient optimization**: Use `ct_mul_const` for public coefficients instead of encrypting them. This reduces both computation time and circuit size.
+</Tip>
+
+<Tip>
+**Batching**: When evaluating the same polynomial on multiple inputs, reuse intermediate results where possible.
+</Tip>
+
+## Source code
+
+The polynomial evaluation example is part of the basic usage tests:
+- `examples/basic_usage.cpp` (lines 137-148)
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Basic usage" icon="play" href="/examples/basic-usage">
+    Learn the fundamentals of PVAC-HFHE
+  </Card>
+  <Card title="ML credit scoring" icon="brain" href="/examples/ml-credit-scoring">
+    Apply polynomials in encrypted ML models
+  </Card>
+</CardGroup>

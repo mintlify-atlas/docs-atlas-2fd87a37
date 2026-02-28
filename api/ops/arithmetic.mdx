@@ -1,0 +1,488 @@
+---
+title: Arithmetic operations
+description: Homomorphic arithmetic operations on encrypted data
+---
+
+## Overview
+
+The arithmetic module provides homomorphic operations for computing on encrypted data without decryption. All operations preserve the encrypted values while allowing addition, subtraction, multiplication, and scalar operations.
+
+## Addition and subtraction
+
+### `ct_add`
+
+Adds two ciphertexts homomorphically.
+
+```cpp
+Cipher ct_add(const PubKey& pk, const Cipher& A, const Cipher& B)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  First ciphertext operand
+</ParamField>
+
+<ParamField path="B" type="const Cipher&" required>
+  Second ciphertext operand
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) + dec(B)`
+</ResponseField>
+
+#### Description
+
+Performs homomorphic addition by:
+1. Fusing the layer graphs of both ciphertexts
+2. Combining edge sets with appropriate layer offset
+3. Adding constant terms: `c0 = A.c0 + B.c0`
+4. Compacting edges if budget is exceeded
+
+<Note>
+  Both ciphertexts must have the same number of slots.
+</Note>
+
+See: arithmetic.hpp:165
+
+---
+
+### `ct_sub`
+
+Subtracts one ciphertext from another.
+
+```cpp
+Cipher ct_sub(const PubKey& pk, const Cipher& A, const Cipher& B)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Minuend ciphertext
+</ParamField>
+
+<ParamField path="B" type="const Cipher&" required>
+  Subtrahend ciphertext
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) - dec(B)`
+</ResponseField>
+
+#### Description
+
+Computes homomorphic subtraction as `ct_add(pk, A, ct_neg(pk, B))`.
+
+See: arithmetic.hpp:190
+
+---
+
+### `ct_neg`
+
+Negates a ciphertext.
+
+```cpp
+Cipher ct_neg(const PubKey& pk, const Cipher& A)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext to negate
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `-dec(A)`
+</ResponseField>
+
+#### Description
+
+Negates by scaling with `-1`.
+
+See: arithmetic.hpp:161
+
+---
+
+## Multiplication
+
+### `ct_mul`
+
+Multiplies two ciphertexts homomorphically.
+
+```cpp
+Cipher ct_mul(const PubKey& pk, const Cipher& A, const Cipher& B, size_t S = 8)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  First ciphertext operand
+</ParamField>
+
+<ParamField path="B" type="const Cipher&" required>
+  Second ciphertext operand
+</ParamField>
+
+<ParamField path="S" type="size_t" default="8">
+  Number of repack edges per product layer (tuning parameter)
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) * dec(B)`
+</ResponseField>
+
+#### Description
+
+Performs homomorphic multiplication by:
+
+1. Separating constant terms: `A = A_g + a0`, `B = B_g + b0`
+2. Creating product layers for all pairs `(layer_a, layer_b)`
+3. Computing repacked edges: `g^B * (R_a * R_b) = target`
+4. Adding cross terms: `a0 * B_g + b0 * A_g`
+5. Setting constant term: `c0 = a0 * b0`
+
+This creates `|A.L| * |B.L|` new product layers.
+
+<Warning>
+  Multiplication significantly increases ciphertext size. Use `ct_square` when multiplying a ciphertext with itself for better efficiency.
+</Warning>
+
+See: arithmetic.hpp:194
+
+---
+
+### `ct_square`
+
+Squares a ciphertext homomorphically.
+
+```cpp
+Cipher ct_square(const PubKey& pk, const Cipher& A, size_t S = 8)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext to square
+</ParamField>
+
+<ParamField path="S" type="size_t" default="8">
+  Number of repack edges per product layer
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A)^2`
+</ResponseField>
+
+#### Description
+
+Computes homomorphic squaring more efficiently than `ct_mul(pk, A, A, S)` by:
+
+1. Only creating product layers for pairs `(i, j)` where `i ≤ j`
+2. Doubling the contribution for off-diagonal pairs: `2 * R_i * R_j`
+3. Creating `|A.L| * (|A.L| + 1) / 2` layers instead of `|A.L|^2`
+
+This reduces the number of layers by approximately 50%.
+
+See: arithmetic.hpp:227
+
+---
+
+## Scalar operations
+
+### `ct_mul_const` (unsigned)
+
+Multiplies a ciphertext by an unsigned constant.
+
+```cpp
+Cipher ct_mul_const(const PubKey& pk, const Cipher& A, uint64_t k)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext operand
+</ParamField>
+
+<ParamField path="k" type="uint64_t" required>
+  Unsigned scalar constant
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `k * dec(A)`
+</ResponseField>
+
+#### Description
+
+Scales all edge weights and the constant term by `k`. This is a cheap operation that doesn't create new layers or edges.
+
+See: arithmetic.hpp:261
+
+---
+
+### `ct_mul_const` (signed)
+
+Multiplies a ciphertext by a signed constant.
+
+```cpp
+Cipher ct_mul_const(const PubKey& pk, const Cipher& A, int64_t k)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext operand
+</ParamField>
+
+<ParamField path="k" type="int64_t" required>
+  Signed scalar constant
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `k * dec(A)`
+</ResponseField>
+
+#### Description
+
+Scales the ciphertext by a signed integer, correctly handling negative values.
+
+See: arithmetic.hpp:265
+
+---
+
+### `ct_div_const`
+
+Divides a ciphertext by a constant (field inversion).
+
+```cpp
+Cipher ct_div_const(const PubKey& pk, const Cipher& A, const Fp& k)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext operand
+</ParamField>
+
+<ParamField path="k" type="const Fp&" required>
+  Field element divisor (must be non-zero)
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) / k` in the field
+</ResponseField>
+
+#### Description
+
+Scales by the multiplicative inverse of `k` in the field. Equivalent to `ct_scale(pk, A, fp_inv(k))`.
+
+<Warning>
+  The divisor `k` must be non-zero. Dividing by zero will cause undefined behavior.
+</Warning>
+
+See: arithmetic.hpp:257
+
+---
+
+### `ct_add_const` (unsigned)
+
+Adds an unsigned constant to a ciphertext.
+
+```cpp
+Cipher ct_add_const(const PubKey&, const Cipher& A, uint64_t k)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key (unused, for API consistency)
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext operand
+</ParamField>
+
+<ParamField path="k" type="uint64_t" required>
+  Unsigned constant to add
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) + k`
+</ResponseField>
+
+#### Description
+
+Adds a plaintext constant by updating the `c0` term. No new edges or layers are created.
+
+See: arithmetic.hpp:269
+
+---
+
+### `ct_add_const` (signed)
+
+Adds a signed constant to a ciphertext.
+
+```cpp
+Cipher ct_add_const(const PubKey&, const Cipher& A, int64_t k)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key (unused)
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext operand
+</ParamField>
+
+<ParamField path="k" type="int64_t" required>
+  Signed constant to add
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) + k`
+</ResponseField>
+
+See: arithmetic.hpp:277
+
+---
+
+### `ct_sub_const` (unsigned)
+
+Subtracts an unsigned constant from a ciphertext.
+
+```cpp
+Cipher ct_sub_const(const PubKey& pk, const Cipher& A, uint64_t k)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext operand
+</ParamField>
+
+<ParamField path="k" type="uint64_t" required>
+  Unsigned constant to subtract
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) - k`
+</ResponseField>
+
+See: arithmetic.hpp:285
+
+---
+
+### `ct_sub_const` (signed)
+
+Subtracts a signed constant from a ciphertext.
+
+```cpp
+Cipher ct_sub_const(const PubKey& pk, const Cipher& A, int64_t k)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext operand
+</ParamField>
+
+<ParamField path="k" type="int64_t" required>
+  Signed constant to subtract
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `dec(A) - k`
+</ResponseField>
+
+See: arithmetic.hpp:289
+
+---
+
+### `ct_scale`
+
+Scales a ciphertext by a field element.
+
+```cpp
+Cipher ct_scale(const PubKey&, const Cipher& A, const Fp& s)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key (unused)
+</ParamField>
+
+<ParamField path="A" type="const Cipher&" required>
+  Ciphertext to scale
+</ParamField>
+
+<ParamField path="s" type="const Fp&" required>
+  Field element scalar
+</ParamField>
+
+<ResponseField name="return" type="Cipher">
+  Ciphertext encrypting `s * dec(A)`
+</ResponseField>
+
+#### Description
+
+Multiplies all edge weights and constant terms by the field element `s`. This is the most general scalar multiplication function.
+
+See: arithmetic.hpp:152
+
+---
+
+## Example usage
+
+```cpp
+// Encrypt two values
+Cipher a = enc_value(pk, sk, 10);
+Cipher b = enc_value(pk, sk, 5);
+
+// Homomorphic arithmetic
+Cipher sum = ct_add(pk, a, b);           // Encrypts 15
+Cipher diff = ct_sub(pk, a, b);          // Encrypts 5
+Cipher prod = ct_mul(pk, a, b);          // Encrypts 50
+Cipher sq = ct_square(pk, a);            // Encrypts 100
+
+// Scalar operations (no multiplication depth increase)
+Cipher doubled = ct_mul_const(pk, a, 2); // Encrypts 20
+Cipher shifted = ct_add_const(pk, a, 3); // Encrypts 13
+
+// Complex expression: (a + 2) * b - 5
+Cipher result = ct_sub_const(pk, 
+                  ct_mul(pk, ct_add_const(pk, a, 2), b),
+                  5);
+// Encrypts (10 + 2) * 5 - 5 = 55
+```
+
+---
+
+## Performance considerations
+
+<Note>
+  **Operation costs:**
+  - Addition/subtraction: O(edges) - very fast
+  - Scalar operations: O(edges) - very fast
+  - Multiplication: O(layers^2) - expensive, increases depth
+  - Square: O(layers^2 / 2) - more efficient than general multiplication
+</Note>
+
+<Warning>
+  Multiplication creates many new layers. For deep circuits, periodically use `ct_recrypt` to refresh noise and compact the ciphertext.
+</Warning>

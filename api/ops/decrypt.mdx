@@ -1,0 +1,198 @@
+---
+title: Decryption operations
+description: Functions for decrypting ciphertexts to plaintext values and field elements
+---
+
+## Overview
+
+The decryption module provides functions for decrypting PVAC-HFHE ciphertexts back to plaintext values. Decryption requires both the public key and secret key.
+
+## Core decryption functions
+
+### `dec_value`
+
+Decrypts a single-slot ciphertext to a field element.
+
+```cpp
+Fp dec_value(const PubKey& pk, const SecKey& sk, const Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key used during encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key used during encryption
+</ParamField>
+
+<ParamField path="C" type="const Cipher&" required>
+  Ciphertext to decrypt
+</ParamField>
+
+<ResponseField name="return" type="Fp">
+  The decrypted field element from the first slot
+</ResponseField>
+
+#### Description
+
+Decrypts a ciphertext and returns the field element in the first slot. For single-value ciphertexts created with `enc_value`, this returns the encrypted integer modulo the field prime.
+
+<Note>
+  This function is equivalent to `dec_values(pk, sk, C)[0]`.
+</Note>
+
+See: decrypt.hpp:77
+
+---
+
+### `dec_values`
+
+Decrypts a multi-slot ciphertext to a vector of field elements.
+
+```cpp
+std::vector<Fp> dec_values(const PubKey& pk, const SecKey& sk, const Cipher& C)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key used during encryption
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key used during encryption
+</ParamField>
+
+<ParamField path="C" type="const Cipher&" required>
+  Ciphertext to decrypt
+</ParamField>
+
+<ResponseField name="return" type="std::vector<Fp>">
+  Vector of decrypted field elements, one per slot
+</ResponseField>
+
+#### Description
+
+Decrypts all slots of a ciphertext. The function:
+
+1. Recursively evaluates the PRF `R` for each layer using the secret key
+2. Accumulates the contributions from all edges: `sum of ±g^B[i] * w[j] / R[layer][j]`
+3. Adds the constant term `c0`
+
+The result is a vector with `C.slots` field elements.
+
+<Warning>
+  The ciphertext must have been created with the same key pair. Using mismatched keys will produce garbage output without error.
+</Warning>
+
+See: decrypt.hpp:46
+
+---
+
+## Implementation details
+
+### Layer PRF evaluation
+
+The decryption algorithm uses a recursive PRF evaluation with caching:
+
+```cpp
+std::vector<Fp> layer_R_cached(
+    const PubKey& pk,
+    const SecKey& sk,
+    const Cipher& C,
+    uint32_t lid,
+    std::vector<uint8_t>& st,
+    std::vector<std::vector<Fp>>& cache
+)
+```
+
+<ParamField path="pk" type="const PubKey&" required>
+  Public key
+</ParamField>
+
+<ParamField path="sk" type="const SecKey&" required>
+  Secret key
+</ParamField>
+
+<ParamField path="C" type="const Cipher&" required>
+  Ciphertext being decrypted
+</ParamField>
+
+<ParamField path="lid" type="uint32_t" required>
+  Layer ID to evaluate
+</ParamField>
+
+<ParamField path="st" type="std::vector<uint8_t>&" required>
+  State vector for cycle detection
+</ParamField>
+
+<ParamField path="cache" type="std::vector<std::vector<Fp>>&" required>
+  Cache for memoization
+</ParamField>
+
+<ResponseField name="return" type="std::vector<Fp>">
+  Vector of R values for the layer, one per slot
+</ResponseField>
+
+#### Description
+
+Evaluates the PRF for a layer recursively:
+
+- **BASE layers**: Evaluates `prf_R_slots(pk, sk, L.seed, C.slots)`
+- **PROD layers**: Computes `R[pa] * R[pb]` element-wise
+
+The function uses memoization to avoid recomputing R values for shared layers. It also detects cycles in the layer graph and aborts if found.
+
+<Note>
+  This is an internal function used by `dec_values`. Users typically don't call it directly.
+</Note>
+
+See: decrypt.hpp:13
+
+---
+
+## Decryption formula
+
+For a ciphertext `C`, the decryption computes:
+
+```
+m[j] = c0[j] + sum over edges e of:
+         sign(e.ch) * g^B[e.idx] * e.w[j] / R[e.layer_id][j]
+```
+
+Where:
+- `j` ranges over slots `0..C.slots-1`
+- `sign(SGN_P) = +1`, `sign(SGN_M) = -1`
+- `g^B[i]` is the public key's generator power table
+- `R[layer][j]` is the PRF output for that layer and slot
+
+---
+
+## Example usage
+
+```cpp
+// Encrypt a value
+Cipher ct = enc_value(pk, sk, 42);
+
+// Decrypt back to field element
+Fp result = dec_value(pk, sk, ct);
+
+// Convert field element to integer
+uint64_t value = fp_to_u64(result);  // Should be 42
+
+// Multi-slot example
+std::vector<uint64_t> inputs = {10, 20, 30};
+Cipher ct_batch = enc_values(pk, sk, inputs);
+std::vector<Fp> outputs = dec_values(pk, sk, ct_batch);
+```
+
+---
+
+## Performance notes
+
+- Decryption time is proportional to the number of layers and edges
+- Layer R values are cached, so shared layers are only evaluated once
+- Multi-slot ciphertexts decrypt all slots in a single pass
+- Large ciphertexts (many edges) take longer to decrypt
+
+<Note>
+  Consider using `compact_edges` and `compact_layers` before decryption to improve performance on large ciphertexts.
+</Note>
