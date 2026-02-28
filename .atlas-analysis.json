@@ -1,0 +1,140 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "PVAC-HFHE",
+  "projectDescription": "C++17 header-only library for publicly verifiable arithmetic computations using hypergraph-based homomorphic encryption over Fp (p = 2^127 - 1)",
+  "theme": "aspen",
+  "primaryColor": "#6366F1",
+  "lightColor": "#818CF8",
+  "darkColor": "#4F46E5",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/overview",
+              "concepts/field-arithmetic",
+              "concepts/encryption-scheme",
+              "concepts/homomorphic-operations",
+              "concepts/security"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/basic-operations",
+              "guides/key-generation",
+              "guides/encryption-decryption",
+              "guides/arithmetic-operations",
+              "guides/depth-management",
+              "guides/text-encryption",
+              "guides/performance-tuning"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/basic-usage",
+              "examples/polynomial-evaluation",
+              "examples/ml-credit-scoring"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api/core/types",
+              "api/core/field",
+              "api/core/config",
+              "api/core/bitvec",
+              "api/core/random",
+              "api/core/hash"
+            ]
+          },
+          {
+            "group": "Cryptography",
+            "pages": [
+              "api/crypto/keygen",
+              "api/crypto/lpn",
+              "api/crypto/matrix",
+              "api/crypto/toeplitz"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "api/ops/encrypt",
+              "api/ops/decrypt",
+              "api/ops/arithmetic",
+              "api/ops/recrypt",
+              "api/ops/commit"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/utils/metrics",
+              "api/utils/text"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Benchmarks",
+        "groups": [
+          {
+            "group": "Performance",
+            "pages": [
+              "benchmarks/overview",
+              "benchmarks/comparison",
+              "benchmarks/methodology"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Header-only C++17 library for homomorphic encryption",
+    "Arithmetic over 127-bit prime field (p = 2^127 - 1)",
+    "Hypergraph-based encryption with public verifiability",
+    "Support for addition, subtraction, multiplication operations on encrypted data",
+    "Compact ciphertext size (42 KB fresh, 6-85x smaller than RLWE schemes)",
+    "Fast scalar operations (2.9-14.3x faster multiplication vs BFV/CKKS)",
+    "LPN-based security with 128-bit security level",
+    "Text encryption and commitment support"
+  ],
+  "publicApiSurface": [
+    "pvac::keygen()",
+    "pvac::enc_value()",
+    "pvac::dec_value()",
+    "pvac::ct_add()",
+    "pvac::ct_sub()",
+    "pvac::ct_mul()",
+    "pvac::ct_square()",
+    "pvac::ct_mul_const()",
+    "pvac::ct_add_const()",
+    "pvac::enc_text()",
+    "pvac::dec_text()",
+    "pvac::commit_ct()",
+    "pvac::Params",
+    "pvac::PubKey",
+    "pvac::SecKey",
+    "pvac::Cipher",
+    "pvac::Fp"
+  ]
+}
